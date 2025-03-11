@@ -1,0 +1,18 @@
+[binance]
+api_key = YOUR_BINANCE_API_KEY
+api_secret = YOUR_BINANCE_API_SECRET
+use_testnet = True
+
+[deepseek]
+# DeepSeek API key (uses OpenAI-compatible API)
+api_key = YOUR_DEEPSEEK_API_KEY
+# Base URL for the DeepSeek API (no trailing slashes or path segments)
+api_url = https://api.deepseek.com
+# DeepSeek model name to use
+model_name = deepseek-chat
+
+[trading]
+symbol = BTCUSDT
+confidence_threshold = 0.85
+# Time between trading cycles in seconds (5 minutes)
+run_interval_seconds = 300 
