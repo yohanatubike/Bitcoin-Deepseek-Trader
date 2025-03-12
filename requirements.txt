@@ -4,5 +4,5 @@ pandas==2.0.3
 python-dotenv==1.0.0
 openai==1.10.0
 sanpy==0.11.0
-binance-futures-connector==1.1.0
+binance-futures-connector==4.1.0
 python-binance==0.7.4
