@@ -10,7 +10,7 @@ from typing import Dict, Any
 
 def setup_logging(log_level: str = "INFO", log_dir: str = "logs") -> logging.Logger:
     """
-    Set up logging configuration
+    Set up stylish logging configuration with colored output
     
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -23,51 +23,77 @@ def setup_logging(log_level: str = "INFO", log_dir: str = "logs") -> logging.Log
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     
-    # Convert string log level to logging constant
+    # Set up logging level
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
     
-    # Configure root logger
-    logger = logging.getLogger()
-    logger.setLevel(numeric_level)
+    # Define color codes for different log levels
+    class ColoredFormatter(logging.Formatter):
+        COLORS = {
+            'DEBUG': '\033[36m',  # Cyan
+            'INFO': '\033[32m',   # Green
+            'WARNING': '\033[33m', # Yellow
+            'ERROR': '\033[31m',  # Red
+            'CRITICAL': '\033[1;31m', # Bold Red
+            'RESET': '\033[0m'    # Reset
+        }
+        
+        SYMBOLS = {
+            'DEBUG': '🔍',
+            'INFO': '✅',
+            'WARNING': '⚠️',
+            'ERROR': '❌',
+            'CRITICAL': '🔥'
+        }
+        
+        def format(self, record):
+            log_symbol = self.SYMBOLS.get(record.levelname, '')
+            log_color = self.COLORS.get(record.levelname, self.COLORS['RESET'])
+            log_reset = self.COLORS['RESET']
+            
+            # Format the message with color
+            record.levelname = f"{log_color}{record.levelname}{log_reset}"
+            record.msg = f"{log_symbol} {record.msg}"
+            
+            return super().format(record)
     
-    # Remove existing handlers to avoid duplicate logs
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
+    # Create formatters
+    console_formatter = ColoredFormatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
     
     # Create console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(numeric_level)
+    console_handler.setFormatter(console_formatter)
     
-    # Create file handler for all logs
+    # Create file handler (rotating log file)
+    log_file = os.path.join(log_dir, 'trading_bot.log')
     file_handler = RotatingFileHandler(
-        os.path.join(log_dir, "trading_bot.log"),
-        maxBytes=10 * 1024 * 1024,  # 10 MB
+        log_file, 
+        maxBytes=10*1024*1024,  # 10MB
         backupCount=5
     )
     file_handler.setLevel(numeric_level)
+    file_handler.setFormatter(file_formatter)
     
-    # Create file handler for errors only
-    error_handler = RotatingFileHandler(
-        os.path.join(log_dir, "error.log"),
-        maxBytes=10 * 1024 * 1024,  # 10 MB
-        backupCount=5
-    )
-    error_handler.setLevel(logging.ERROR)
+    # Get logger and add handlers
+    logger = logging.getLogger()
+    logger.setLevel(numeric_level)
     
-    # Create formatter
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+    # Remove existing handlers if any
+    if logger.handlers:
+        logger.handlers.clear()
     
-    # Set formatters
-    console_handler.setFormatter(formatter)
-    file_handler.setFormatter(formatter)
-    error_handler.setFormatter(formatter)
-    
-    # Add handlers to logger
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
-    logger.addHandler(error_handler)
+    
+    logger.info(f"Logging initialized at level {log_level}")
+    logger.info(f"Log file: {log_file}")
     
     return logger
 
