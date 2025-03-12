@@ -297,7 +297,11 @@ class TradingBot:
                 time.sleep(self.cycle_interval)
                 return
             
+            # Log all prediction details including volatility
             logger.info(f"🤖 Prediction: {action} with {confidence:.2f} confidence")
+            logger.info(f"📊 Market volatility: {volatility:.6f}")
+            print(f"CRITICAL DEBUG - Market volatility value: {volatility:.6f}")
+            
             if stop_loss:
                 logger.info(f"🛑 Stop Loss: {stop_loss}")
             if take_profit:

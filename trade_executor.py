@@ -99,6 +99,10 @@ class TradeExecutor:
         Returns:
             Whether the trade was executed
         """
+        # DEBUGGING: Log that execute_trade was called
+        print(f"DEBUG: Execute trade called: action={action}, confidence={confidence:.2f}, threshold={confidence_threshold:.2f}, volatility={volatility}")
+        logger.info(f"DEBUG: Execute trade called: action={action}, confidence={confidence:.2f}, threshold={confidence_threshold:.2f}, volatility={volatility}")
+        
         # Skip if action is HOLD or confidence is below threshold
         if action == "HOLD" or confidence < confidence_threshold:
             logger.info(f"No trade: action={action}, confidence={confidence:.2f} < threshold={confidence_threshold:.2f}")
@@ -118,15 +122,41 @@ class TradeExecutor:
             
         try:
             # Get account information for position sizing
+            logger.info("Fetching account info for position sizing...")
             account_info = self.client.get_account_info()
             
+            # DEBUGGING: Check account info
+            if account_info:
+                logger.info(f"Account info retrieved, keys: {account_info.keys() if isinstance(account_info, dict) else 'Not a dict'}")
+            else:
+                logger.warning("Account info is None or empty")
+            
+            # Adjust risk based on open positions
+            original_risk = self.risk_per_trade
+            adjusted_risk = self._adjust_risk_for_open_positions(original_risk)
+            
+            # Temporarily set the adjusted risk
+            old_risk = self.risk_per_trade
+            self.risk_per_trade = adjusted_risk
+            
+            # Check if this is a high confidence trade (>0.9 confidence)
+            # If so, we'll use a large percentage of our risk amount
+            high_confidence = confidence > 0.9
+            
             # Calculate position size based on risk management
-            quantity = self._calculate_position_size(volatility, account_info)
+            logger.info(f"Calculating position size with volatility: {volatility}, high_confidence: {high_confidence}, adjusted_risk: {adjusted_risk:.2f}")
+            quantity = self._calculate_position_size(volatility, account_info, high_confidence)
+            
+            # Restore original risk setting
+            self.risk_per_trade = old_risk
             
             if quantity <= 0:
                 logger.warning(f"Calculated quantity is too small: {quantity}. Skipping trade.")
                 return False
                 
+            # DEBUGGING: Log the calculated quantity
+            logger.info(f"Calculated quantity: {quantity}")
+            
             # Execute the trade
             if action == "BUY":
                 success = self._execute_buy(symbol, quantity, stop_loss, take_profit)
@@ -139,31 +169,133 @@ class TradeExecutor:
             return success
             
         except Exception as e:
+            error_trace = traceback.format_exc()
             logger.error(f"Error executing trade: {str(e)}")
+            logger.debug(f"Error trace: {error_trace}")
             return False
 
-    def _calculate_position_size(self, volatility: float, account_info: Dict[str, Any]) -> float:
+    def _adjust_risk_for_open_positions(self, base_risk: float) -> float:
+        """
+        Dynamically adjust risk percentage based on number of open positions and available margin
+        
+        Args:
+            base_risk: Base risk percentage (0.0-1.0)
+            
+        Returns:
+            Adjusted risk percentage
+        """
+        # Get current number of positions
+        position_count = len(self.positions)
+        
+        if position_count == 0:
+            # No existing positions, use full risk
+            return base_risk
+            
+        # Get account info to check margin usage
+        try:
+            account_info = self.client.get_account_info()
+            
+            # Check if we have available balance info
+            available_balance = 0
+            total_balance = 0
+            
+            if isinstance(account_info, dict):
+                available_balance = float(account_info.get("availableBalance", 0))
+                total_balance = float(account_info.get("totalWalletBalance", 0))
+                
+                # If values not found, try assets
+                if total_balance == 0:
+                    assets = account_info.get("assets", [])
+                    for asset in assets:
+                        if asset.get("asset") == "USDT":
+                            total_balance = float(asset.get("walletBalance", 0))
+                            break
+            
+            # Calculate used percentage
+            if total_balance > 0:
+                used_percent = 1 - (available_balance / total_balance)
+                logger.info(f"Used margin percentage: {used_percent:.2%}")
+                
+                # Adjust risk based on available margin
+                # If more than 50% of margin is used, start scaling down risk
+                if used_percent > 0.5:
+                    # Linear reduction: at 50% usage, use 100% of base risk
+                    # at 90% usage, use only 10% of base risk
+                    margin_scale = max(0.1, 1 - ((used_percent - 0.5) * 2.5))
+                    adjusted_risk = base_risk * margin_scale
+                    logger.info(f"Scaling down risk due to high margin usage: {base_risk:.2%} → {adjusted_risk:.2%}")
+                    return adjusted_risk
+                
+            # If we can't determine margin usage or it's not high,
+            # scale based on position count alone
+            adjusted_risk = base_risk / (position_count + 1)
+            logger.info(f"Scaling down risk based on {position_count} existing positions: {base_risk:.2%} → {adjusted_risk:.2%}")
+            return adjusted_risk
+            
+        except Exception as e:
+            # If there's an error, fall back to a simple reduction based on position count
+            fallback_risk = base_risk / (position_count + 1)
+            logger.warning(f"Error calculating adjusted risk: {str(e)}. Using fallback: {fallback_risk:.2%}")
+            return fallback_risk
+
+    def _calculate_position_size(self, volatility: float, account_info: Dict[str, Any], high_confidence: bool = False) -> float:
         """
         Calculate position size based on advanced risk management for futures
         
         Args:
             volatility: Market volatility (ATR or other volatility measure)
             account_info: Account information
+            high_confidence: Whether this is a high confidence trade (use larger position)
             
         Returns:
             Position size in base currency
         """
+        # DEBUGGING: Log that we've entered the function
+        print("DEBUG: Entered _calculate_position_size function")
+        logger.debug("DEBUG: Entered _calculate_position_size function")
+        
         try:
             # Get account balance
             total_balance = 0
             unrealized_pnl = 0
+            available_balance = 0
+            margin_balance = 0
             
-            assets = account_info.get("assets", [])
-            for asset in assets:
-                if asset.get("asset") == "USDT":
-                    total_balance = float(asset.get("walletBalance", 0))
-                    unrealized_pnl = float(asset.get("unrealizedProfit", 0))
-                    break
+            # DEBUGGING: Log account info structure
+            logger.debug(f"Account info structure: {account_info.keys() if isinstance(account_info, dict) else 'Not a dict'}")
+            
+            # Get all important account metrics
+            if isinstance(account_info, dict):
+                # Get total wallet balance
+                total_balance = float(account_info.get("totalWalletBalance", 0))
+                
+                # Get available balance (this is the free margin)
+                available_balance = float(account_info.get("availableBalance", 0))
+                
+                # Get margin balance (equity)
+                margin_balance = float(account_info.get("totalMarginBalance", 0))
+                
+                # Calculate used margin
+                used_margin = margin_balance - available_balance
+                
+                # Get unrealized PnL
+                unrealized_pnl = float(account_info.get("totalUnrealizedProfit", 0))
+                
+                # If we couldn't find the values in the expected fields, try assets
+                if total_balance == 0:
+                    assets = account_info.get("assets", [])
+                    for asset in assets:
+                        if asset.get("asset") == "USDT":
+                            total_balance = float(asset.get("walletBalance", 0))
+                            unrealized_pnl = float(asset.get("unrealizedProfit", 0))
+                            break
+            
+            # Log available margin for better decision making
+            logger.info(f"Account metrics - Total Balance: ${total_balance:.2f}, Available Balance: ${available_balance:.2f}")
+            logger.info(f"Used Margin: ${used_margin:.2f}, Number of current positions: {len(self.positions)}")
+            
+            # DEBUGGING: Force log at INFO level
+            logger.info(f"POSITION SIZING - Balance: {total_balance}, volatility: {volatility}")
             
             # Get current market price using the new method
             current_price = self.client.get_current_price(self.symbol)
@@ -176,15 +308,70 @@ class TradeExecutor:
             risk_amount = total_balance * self.risk_per_trade
             
             # Calculate stop loss distance as % of price based on volatility
+            # Cap the volatility impact to ensure reasonable position sizes
             # Higher volatility = wider stop loss to avoid noise-triggered stops
-            stop_loss_pct = max(0.005, volatility * 1.5)  # Minimum 0.5% SL distance
+            volatility_capped = min(volatility, 0.02)  # Cap volatility at 2%
+            stop_loss_pct = max(0.005, volatility_capped * 1.5)  # Minimum 0.5% SL distance
+            
+            # For high confidence trades, we use a much higher percentage of the account
+            if high_confidence:
+                logger.info("🚀 HIGH CONFIDENCE TRADE - Using larger position size")
+                # Use 80% of the risk amount directly
+                min_position_pct = 0.8  # 80% of risk amount for high confidence
+                safety_factor = 1.0  # No safety reduction for high confidence
+            else:
+                # Regular trades
+                min_position_pct = 0.3  # At least 30% of risk amount
+                safety_factor = 0.9  # Slight safety factor for regular trades
+            
+            # Hard minimum position size - ensure we're using a significant portion of risk amount
+            min_position_value = risk_amount * min_position_pct * self.leverage
             
             # Calculate position size based on risk amount and stop loss distance
             position_value_without_leverage = risk_amount / stop_loss_pct
             
             # Apply leverage (with safety factor to prevent liquidation)
-            safety_factor = 0.5  # Reduce position size for safety
             position_value = position_value_without_leverage * self.leverage * safety_factor
+            
+            # For high confidence trades, ensure we're using a large position
+            if high_confidence:
+                # Use at least 50% of the risk amount (with leverage)
+                position_value = max(position_value, risk_amount * 0.5 * self.leverage)
+            
+            # Ensure position value meets our minimum threshold
+            position_value = max(position_value, min_position_value)
+            
+            # Additional log to show the impact of changing the safety factor
+            logger.info(f"Risk amount: {risk_amount:.2f} USDT, Volatility (capped): {volatility_capped:.4f}")
+            logger.info(f"Position value without safety factor would be: {position_value_without_leverage * self.leverage:.2f} USDT")
+            logger.info(f"Position value with safety factor ({safety_factor}) is: {position_value:.2f} USDT")
+            logger.info(f"Minimum position value: {min_position_value:.2f} USDT")
+            if high_confidence:
+                logger.info("Using high confidence position sizing")
+            
+            # For very large positions, cap at 80% of the account balance to prevent overexposure
+            max_position_value = total_balance * 0.8 * self.leverage
+            if position_value > max_position_value:
+                logger.warning(f"Position value {position_value:.2f} exceeds maximum safe value. Capping at {max_position_value:.2f}")
+                position_value = max_position_value
+            
+            # NEW: Check available margin and adjust position size if needed
+            # We want to ensure we have enough margin for this trade
+            if available_balance > 0:
+                # For futures trading, the margin required is approximately position_value / leverage
+                required_margin = position_value / self.leverage
+                
+                # Add a 10% buffer to prevent just barely hitting the limit
+                required_margin_with_buffer = required_margin * 1.1
+                
+                # If required margin exceeds available balance, scale down the position
+                if required_margin_with_buffer > available_balance:
+                    margin_ratio = available_balance / required_margin_with_buffer
+                    old_position_value = position_value
+                    position_value = position_value * margin_ratio
+                    
+                    logger.warning(f"Scaling down position due to margin constraints: Available=${available_balance:.2f}, Required=${required_margin_with_buffer:.2f}")
+                    logger.warning(f"Position value reduced from {old_position_value:.2f} to {position_value:.2f}")
             
             # Binance Futures requires minimum order value of 100 USDT
             min_notional = 100.0
@@ -196,7 +383,11 @@ class TradeExecutor:
             # Calculate quantity in the base asset
             quantity = position_value / current_price
             
-            # Log details for transparency
+            # FORCE Log details for transparency at all levels
+            print(f"💰 Risk calculation: Balance={total_balance:.2f} USDT, Risk={self.risk_per_trade*100:.1f}%, Risk amount={risk_amount:.2f} USDT")
+            print(f"📏 Position sizing: Volatility={volatility:.4f}, SL%={stop_loss_pct*100:.2f}%, Leverage={self.leverage}x")
+            print(f"🔢 Position size: {position_value:.2f} USDT ({quantity:.8f} {self.symbol[:-4]}) at price {current_price:.2f}")
+            
             logger.info(f"💰 Risk calculation: Balance={total_balance:.2f} USDT, Risk={self.risk_per_trade*100:.1f}%, Risk amount={risk_amount:.2f} USDT")
             logger.info(f"📏 Position sizing: Volatility={volatility:.4f}, SL%={stop_loss_pct*100:.2f}%, Leverage={self.leverage}x")
             logger.info(f"🔢 Position size: {position_value:.2f} USDT ({quantity:.8f} {self.symbol[:-4]}) at price {current_price:.2f}")
@@ -204,7 +395,11 @@ class TradeExecutor:
             return quantity
             
         except Exception as e:
+            # DEBUGGING: Print and log the full exception
+            error_trace = traceback.format_exc()
+            print(f"❌ Error calculating position size: {str(e)}\n{error_trace}")
             logger.error(f"❌ Error calculating position size: {str(e)}")
+            logger.debug(f"Error trace: {error_trace}")
             return 0.0
 
     def _execute_buy(self, symbol: str, quantity: float, stop_loss: Optional[float], 
@@ -214,7 +409,7 @@ class TradeExecutor:
         
         Args:
             symbol: Trading pair symbol
-            quantity: Order quantity in quote currency (USDT)
+            quantity: Order quantity in the base asset (e.g. BTC for BTCUSDT)
             stop_loss: Stop loss price
             take_profit: Take profit price
             
@@ -229,17 +424,21 @@ class TradeExecutor:
                 logger.error(f"Invalid current price: {current_price}")
                 return False
                 
-            # Convert USDT quantity to asset quantity
-            asset_quantity = quantity / current_price
+            # IMPORTANT: The quantity is already in BTC, not USDT
+            # Calculate USD value for logging purposes
+            usd_value = quantity * current_price
+            
+            # Log the actual values we're working with
+            logger.info(f"Using pre-calculated quantity: {quantity} {symbol[:-4]} at price {current_price} (value: {usd_value:.2f} USDT)")
             
             # Check minimum notional value (Binance Futures requires minimum order value of 100 USDT)
             min_notional = 100.0  # Minimum order value in USDT
-            order_value = asset_quantity * current_price
             
-            if order_value < min_notional:
-                logger.warning(f"Order value {order_value:.2f} USDT is below minimum {min_notional} USDT. Adjusting quantity.")
-                asset_quantity = (min_notional * 1.01) / current_price  # Add 1% buffer
-                logger.info(f"Adjusted quantity to {asset_quantity} to meet minimum notional value")
+            if usd_value < min_notional:
+                logger.warning(f"Order value {usd_value:.2f} USDT is below minimum {min_notional} USDT. Adjusting quantity.")
+                quantity = (min_notional * 1.01) / current_price  # Add 1% buffer
+                usd_value = quantity * current_price
+                logger.info(f"Adjusted quantity to {quantity} to meet minimum notional value")
             
             # Get symbol info for precision
             symbol_info = self.client.get_exchange_info(symbol)
@@ -254,12 +453,12 @@ class TradeExecutor:
                     min_qty = 0.001    # Standard BTC minimum quantity
                     
                     # Round down to the nearest step size
-                    asset_quantity = math.floor(asset_quantity / step_size) * step_size
+                    quantity = math.floor(quantity / step_size) * step_size
                     
                     # Ensure minimum quantity
-                    if asset_quantity < min_qty:
-                        logger.warning(f"Calculated quantity {asset_quantity} is below minimum {min_qty}. Using minimum.")
-                        asset_quantity = min_qty
+                    if quantity < min_qty:
+                        logger.warning(f"Calculated quantity {quantity} is below minimum {min_qty}. Using minimum.")
+                        quantity = min_qty
                 except Exception as e:
                     logger.error(f"Error using default precision: {str(e)}")
                     return False
@@ -282,25 +481,25 @@ class TradeExecutor:
                     min_qty = float(lot_size_filter.get("minQty", 0.001))
                 
                 # Round to the nearest step size - use ceil for buy orders to ensure minimum notional
-                asset_quantity = math.ceil(asset_quantity / step_size) * step_size
+                quantity = math.ceil(quantity / step_size) * step_size
                 
                 # Ensure minimum quantity
-                if asset_quantity < min_qty:
-                    logger.warning(f"Calculated quantity {asset_quantity} is below minimum {min_qty}. Using minimum.")
-                    asset_quantity = min_qty
+                if quantity < min_qty:
+                    logger.warning(f"Calculated quantity {quantity} is below minimum {min_qty}. Using minimum.")
+                    quantity = min_qty
                 
             # Final check: ensure minimum notional value is met
-            final_order_value = asset_quantity * current_price
+            final_order_value = quantity * current_price
             if final_order_value < min_notional:
                 logger.warning(f"Final order value {final_order_value:.2f} USDT still below minimum {min_notional} USDT after adjustments.")
                 # Force minimum notional value with buffer
-                asset_quantity = (min_notional / current_price) * 1.05  # Add 5% buffer to be safe
+                quantity = (min_notional / current_price) * 1.05  # Add 5% buffer to be safe
                 # Use ceiling to round up to the nearest step size
-                asset_quantity = math.ceil(asset_quantity / step_size) * step_size
-                logger.info(f"Forced quantity to {asset_quantity} to ensure minimum notional value")
+                quantity = math.ceil(quantity / step_size) * step_size
+                logger.info(f"Forced quantity to {quantity} to ensure minimum notional value")
                 
             # Execute the order
-            logger.info(f"Executing BUY order for {symbol}: {asset_quantity} at ~{current_price} USDT (value: {asset_quantity * current_price:.2f} USDT)")
+            logger.info(f"Executing BUY order for {symbol}: {quantity} at ~{current_price} USDT (value: {quantity * current_price:.2f} USDT)")
             
             # For futures, we need to set the leverage first
             if self.leverage != float(self.client.get_leverage(symbol)):
@@ -314,7 +513,7 @@ class TradeExecutor:
             response = self.client.execute_order(
                 symbol=symbol,
                 side="BUY",
-                quantity=asset_quantity,
+                quantity=quantity,
                 order_type="MARKET",
                 stop_loss=stop_loss,
                 take_profit=take_profit,
@@ -331,13 +530,13 @@ class TradeExecutor:
                     "symbol": symbol,
                     "side": "BUY",
                     "entry_price": current_price,
-                    "quantity": asset_quantity,
+                    "quantity": quantity,
                     "timestamp": timestamp,
                     "position_id": position_id,
                     "order_id": response.get("orderId")
                 })
                 
-                logger.info(f"BUY order executed successfully: {symbol} {asset_quantity} @ ~{current_price}, Position ID: {position_id}")
+                logger.info(f"BUY order executed successfully: {symbol} {quantity} @ ~{current_price}, Position ID: {position_id}")
                 return True
             else:
                 logger.error(f"BUY order failed: {response}")
@@ -354,7 +553,7 @@ class TradeExecutor:
         
         Args:
             symbol: Trading pair symbol
-            quantity: Order quantity in quote currency (USDT)
+            quantity: Order quantity in the base asset (e.g. BTC for BTCUSDT)
             stop_loss: Stop loss price
             take_profit: Take profit price
             
@@ -371,17 +570,21 @@ class TradeExecutor:
                     logger.error(f"Invalid current price: {current_price}")
                     return False
                     
-                # Convert USDT quantity to asset quantity
-                asset_quantity = quantity / current_price
+                # IMPORTANT: The quantity is already in BTC, not USDT
+                # Calculate USD value for logging purposes
+                usd_value = quantity * current_price
+                
+                # Log the actual values we're working with
+                logger.info(f"Using pre-calculated quantity: {quantity} {symbol[:-4]} at price {current_price} (value: {usd_value:.2f} USDT)")
                 
                 # Check minimum notional value (Binance Futures requires minimum order value of 100 USDT)
                 min_notional = 100.0  # Minimum order value in USDT
-                order_value = asset_quantity * current_price
                 
-                if order_value < min_notional:
-                    logger.warning(f"Order value {order_value:.2f} USDT is below minimum {min_notional} USDT. Adjusting quantity.")
-                    asset_quantity = (min_notional * 1.01) / current_price  # Add 1% buffer
-                    logger.info(f"Adjusted quantity to {asset_quantity} to meet minimum notional value")
+                if usd_value < min_notional:
+                    logger.warning(f"Order value {usd_value:.2f} USDT is below minimum {min_notional} USDT. Adjusting quantity.")
+                    quantity = (min_notional * 1.01) / current_price  # Add 1% buffer
+                    usd_value = quantity * current_price
+                    logger.info(f"Adjusted quantity to {quantity} to meet minimum notional value")
                 
                 # Get symbol info for precision
                 symbol_info = self.client.get_exchange_info(symbol)
@@ -396,12 +599,12 @@ class TradeExecutor:
                         min_qty = 0.001    # Standard BTC minimum quantity
                         
                         # Round to the nearest step size using ceiling to ensure min notional
-                        asset_quantity = math.ceil(asset_quantity / step_size) * step_size
+                        quantity = math.ceil(quantity / step_size) * step_size
                         
                         # Ensure minimum quantity
-                        if asset_quantity < min_qty:
-                            logger.warning(f"Calculated quantity {asset_quantity} is below minimum {min_qty}. Using minimum.")
-                            asset_quantity = min_qty
+                        if quantity < min_qty:
+                            logger.warning(f"Calculated quantity {quantity} is below minimum {min_qty}. Using minimum.")
+                            quantity = min_qty
                     except Exception as e:
                         logger.error(f"Error using default precision: {str(e)}")
                         return False
@@ -424,22 +627,22 @@ class TradeExecutor:
                         min_qty = float(lot_size_filter.get("minQty", 0.001))
                     
                     # Round to the nearest step size using ceiling to ensure min notional
-                    asset_quantity = math.ceil(asset_quantity / step_size) * step_size
+                    quantity = math.ceil(quantity / step_size) * step_size
                     
                     # Ensure minimum quantity
-                    if asset_quantity < min_qty:
-                        logger.warning(f"Calculated quantity {asset_quantity} is below minimum {min_qty}. Using minimum.")
-                        asset_quantity = min_qty
+                    if quantity < min_qty:
+                        logger.warning(f"Calculated quantity {quantity} is below minimum {min_qty}. Using minimum.")
+                        quantity = min_qty
                 
                 # Final check: ensure minimum notional value is met
-                final_order_value = asset_quantity * current_price
+                final_order_value = quantity * current_price
                 if final_order_value < min_notional:
                     logger.warning(f"Final order value {final_order_value:.2f} USDT still below minimum {min_notional} USDT after adjustments.")
                     # Force minimum notional value with safety buffer
-                    asset_quantity = (min_notional / current_price) * 1.05  # Add 5% buffer to be safe
+                    quantity = (min_notional / current_price) * 1.05  # Add 5% buffer to be safe
                     # Round up to nearest step size
-                    asset_quantity = math.ceil(asset_quantity / step_size) * step_size
-                    logger.info(f"Forced quantity to {asset_quantity} to ensure minimum notional value")
+                    quantity = math.ceil(quantity / step_size) * step_size
+                    logger.info(f"Forced quantity to {quantity} to ensure minimum notional value")
                     
                 # Set leverage first
                 try:
@@ -449,12 +652,12 @@ class TradeExecutor:
                     logger.warning(f"Could not set leverage: {str(e)}")
                 
                 # Execute the order
-                logger.info(f"Executing SELL (SHORT) order for {symbol}: {asset_quantity} at ~{current_price} USDT (value: {asset_quantity * current_price:.2f} USDT)")
+                logger.info(f"Executing SELL (SHORT) order for {symbol}: {quantity} at ~{current_price} USDT (value: {quantity * current_price:.2f} USDT)")
                 
                 response = self.client.execute_order(
                     symbol=symbol,
                     side="SELL",
-                    quantity=asset_quantity,
+                    quantity=quantity,
                     order_type="MARKET",
                     stop_loss=stop_loss,
                     take_profit=take_profit,
@@ -471,13 +674,13 @@ class TradeExecutor:
                         "symbol": symbol,
                         "side": "SELL",
                         "entry_price": current_price,
-                        "quantity": asset_quantity,
+                        "quantity": quantity,
                         "timestamp": timestamp,
                         "position_id": position_id,
                         "order_id": response.get("orderId")
                     })
                     
-                    logger.info(f"SELL (SHORT) order executed successfully: {symbol} {asset_quantity} @ ~{current_price}, Position ID: {position_id}")
+                    logger.info(f"SELL (SHORT) order executed successfully: {symbol} {quantity} @ ~{current_price}, Position ID: {position_id}")
                     return True
                 else:
                     logger.error(f"SELL (SHORT) order failed: {response}")
