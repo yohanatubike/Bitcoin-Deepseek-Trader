@@ -2,5 +2,7 @@ requests==2.31.0
 numpy==1.24.3
 pandas==2.0.3
 python-dotenv==1.0.0
-openai==1.10.0
-sanpy==0.11.0 
+openai==2.0.0
+sanpy==0.11.0
+binance-futures-connector==4.1.0
+python-binance==0.7.4

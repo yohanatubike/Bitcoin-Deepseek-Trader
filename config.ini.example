@@ -1,18 +1,27 @@
 [binance]
 api_key = YOUR_BINANCE_API_KEY
 api_secret = YOUR_BINANCE_API_SECRET
-use_testnet = True
+testnet = True
 
 [deepseek]
-# DeepSeek API key (uses OpenAI-compatible API)
 api_key = YOUR_DEEPSEEK_API_KEY
-# Base URL for the DeepSeek API (no trailing slashes or path segments)
-api_url = https://api.deepseek.com
-# DeepSeek model name to use
-model_name = deepseek-chat
+api_url = https://api.deepseek.com/v1/predictions
+test_mode = False
+
+[santiment]
+# Your Santiment API key (should start with "san_")
+# Get it from: https://app.santiment.net/account#api-keys
+api_key = YOUR_SANTIMENT_API_KEY
+api_url = https://api.santiment.net/graphql
 
 [trading]
 symbol = BTCUSDT
 confidence_threshold = 0.85
-# Time between trading cycles in seconds (5 minutes)
-run_interval_seconds = 300 
+run_interval_seconds = 180
+max_positions = 3
+risk_per_trade = 0.02
+close_positions_on_start = True
+
+[futures]
+leverage = 10
+margin_type = ISOLATED
