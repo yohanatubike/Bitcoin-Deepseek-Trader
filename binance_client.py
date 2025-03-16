@@ -223,6 +223,19 @@ class BinanceClient:
             except Exception as e:
                 logger.error(f"Error fetching 1h klines: {str(e)}")
             
+            # Initialize klines_4h
+            klines_4h = []
+            
+            # Fetch 4-hour klines
+            try:
+                klines_4h = self.client.klines(
+                    symbol=symbol,
+                    interval="4h",
+                    limit=100
+                )
+            except Exception as e:
+                logger.error(f"Error fetching 4h klines: {str(e)}")
+            
             # Fetch order book
             try:
                 order_book = self.client.depth(symbol=symbol, limit=20)
@@ -307,6 +320,17 @@ class BinanceClient:
                 }
             except Exception as e:
                 logger.error(f"Error fetching futures data: {str(e)}")
+            
+            # Add klines to market data
+            market_data["klines"] = {
+                "5m": klines_5m,
+                "1h": klines_1h,
+                "4h": klines_4h
+            }
+            
+            # Log the structure of the market data
+            logger.info(f"Market data structure: {json.dumps({k: type(v).__name__ for k, v in market_data.items()})}")
+            logger.info(f"Klines structure: {json.dumps({k: len(v) for k, v in market_data.get('klines', {}).items()})}")
             
             return market_data
             

@@ -753,25 +753,38 @@ class TradeExecutor:
                 # Determine the closing side
                 close_side = "SELL" if side == "BUY" else "BUY"
                 
-                # For spot positions, check the actual available balance
-                if side == "BUY":
-                    # Extract the base asset (e.g., "BTC" from "BTCUSDT")
-                    base_asset = symbol[:-4] if symbol.endswith("USDT") else symbol.split("USDT")[0]
-                    
-                    # Get the actual free balance
-                    balance_info = self.client.get_asset_balance(base_asset)
-                    free_balance = balance_info.get("free", 0)
-                    
-                    logger.info(f"Actual {base_asset} free balance: {free_balance}, recorded position quantity: {quantity}")
-                    
-                    if free_balance <= 0:
-                        logger.warning(f"No free balance available for {base_asset}. Cannot close position.")
-                        continue
+                # For futures positions, we need to get the current position info
+                # from the exchange to make sure we're using the correct quantity
+                futures_positions = self.client.get_positions(symbol)
+                
+                # Find the matching position
+                futures_position = None
+                for pos in futures_positions:
+                    pos_side = "BUY" if float(pos.get("positionAmt", 0)) > 0 else "SELL"
+                    if pos.get("symbol") == symbol and pos_side == side:
+                        futures_position = pos
+                        break
+                
+                # If we found a matching futures position, use its data
+                if futures_position:
+                    # Get the actual position amount from the exchange
+                    position_amt = abs(float(futures_position.get("positionAmt", 0)))
+                    if position_amt > 0:
+                        logger.info(f"Found active futures position: {symbol} {side} with amount {position_amt}")
                         
-                    # Use the actual free balance instead of the recorded quantity
-                    if abs(free_balance - quantity) > 0.001:  # If there's a significant difference
-                        logger.warning(f"Adjusting sell quantity from {quantity} to {free_balance} based on actual balance")
-                        quantity = free_balance
+                        # Use the actual position amount from the exchange
+                        if abs(position_amt - quantity) > 0.001:  # If there's a significant difference
+                            logger.warning(f"Adjusting position quantity from {quantity} to {position_amt} based on actual position")
+                            quantity = position_amt
+                    else:
+                        logger.warning(f"Position reported by exchange has zero amount: {futures_position}")
+                        # Remove from our tracking but don't try to close
+                        if position_id:
+                            self.positions = [p for p in self.positions if p.get("position_id") != position_id]
+                        continue
+                else:
+                    # If we can't find the position on the exchange, log a warning but try to close anyway
+                    logger.warning(f"Position not found on exchange: {symbol} {side}. Attempting to close with recorded quantity.")
                 
                 # For BTCUSDT specifically, ensure correct precision formatting
                 if symbol.upper() == "BTCUSDT":
@@ -790,7 +803,7 @@ class TradeExecutor:
                     quantity=quantity,
                     order_type="MARKET",
                     raw_quantity=True,  # Use exact quantity without formatting
-                    reduce_only=True  # Use reduce_only only for futures
+                    reduce_only=True    # Use reduce_only for futures
                 )
                 
                 if response and response.get("orderId"):
@@ -808,6 +821,7 @@ class TradeExecutor:
                 
             except Exception as e:
                 logger.error(f"Error closing position: {str(e)}")
+                logger.error(traceback.format_exc())
         
         logger.info(f"Successfully closed {success_count} out of {len(self.positions)} positions")
         
@@ -843,6 +857,283 @@ class TradeExecutor:
             Number of active positions
         """
         return len(self.positions)
+        
+    def close_position(self, position_id: str) -> bool:
+        """
+        Close a specific position by its ID
+        
+        Args:
+            position_id: Unique position identifier
+            
+        Returns:
+            Whether the position was successfully closed
+        """
+        logger.info(f"Closing position with ID: {position_id}")
+        
+        # Find the position by ID
+        position = next((p for p in self.positions if p.get("position_id") == position_id), None)
+        
+        if not position:
+            logger.warning(f"Position with ID {position_id} not found")
+            return False
+            
+        try:
+            symbol = position["symbol"]
+            side = position["side"]
+            quantity = position["quantity"]
+            
+            # Determine the closing side
+            close_side = "SELL" if side == "BUY" else "BUY"
+            
+            # For futures positions, we need to get the current position info
+            # from the exchange to make sure we're using the correct quantity
+            futures_positions = self.client.get_positions(symbol)
+            
+            # Find the matching position
+            futures_position = None
+            for pos in futures_positions:
+                pos_side = "BUY" if float(pos.get("positionAmt", 0)) > 0 else "SELL"
+                if pos.get("symbol") == symbol and pos_side == side:
+                    futures_position = pos
+                    break
+            
+            # If we found a matching futures position, use its data
+            if futures_position:
+                # Get the actual position amount from the exchange
+                position_amt = abs(float(futures_position.get("positionAmt", 0)))
+                if position_amt > 0:
+                    logger.info(f"Found active futures position: {symbol} {side} with amount {position_amt}")
+                    
+                    # Use the actual position amount from the exchange
+                    if abs(position_amt - quantity) > 0.001:  # If there's a significant difference
+                        logger.warning(f"Adjusting position quantity from {quantity} to {position_amt} based on actual position")
+                        quantity = position_amt
+                else:
+                    logger.warning(f"Position reported by exchange has zero amount: {futures_position}")
+                    return False
+            else:
+                # If we can't find the position on the exchange, log a warning but try to close anyway
+                logger.warning(f"Position not found on exchange: {symbol} {side}. Attempting to close with recorded quantity.")
+            
+            # For BTCUSDT specifically, ensure correct precision formatting
+            if symbol.upper() == "BTCUSDT":
+                # Force 3 decimal precision for BTCUSDT
+                quantity = math.floor(quantity * 1000) / 1000
+                logger.info(f"Adjusted BTCUSDT quantity for closing: {quantity}")
+            
+            if quantity <= 0:
+                logger.warning(f"Zero or negative quantity for {symbol}. Cannot close position.")
+                return False
+            
+            # Execute the closing order
+            response = self.client.execute_order(
+                symbol=symbol,
+                side=close_side,
+                quantity=quantity,
+                order_type="MARKET",
+                raw_quantity=True,  # Use exact quantity without formatting
+                reduce_only=True    # Use reduce_only for futures
+            )
+            
+            if response and response.get("orderId"):
+                logger.info(f"Closed {side} position for {symbol}, quantity: {quantity}")
+                
+                # Remove position from list
+                self.positions = [p for p in self.positions if p.get("position_id") != position_id]
+                return True
+            else:
+                logger.error(f"Failed to close position: {response}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error closing position: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+            
+    def partial_close_position(self, position_id: str, percentage: float = 50.0) -> bool:
+        """
+        Partially close a position
+        
+        Args:
+            position_id: Unique position identifier
+            percentage: Percentage of position to close (1-99)
+            
+        Returns:
+            Whether the position was partially closed
+        """
+        logger.info(f"Partially closing position with ID: {position_id} ({percentage}%)")
+        
+        # Validate percentage
+        if percentage <= 0 or percentage >= 100:
+            logger.error(f"Invalid percentage for partial close: {percentage}. Must be between 1-99.")
+            return False
+            
+        # Find the position by ID
+        position = next((p for p in self.positions if p.get("position_id") == position_id), None)
+        
+        if not position:
+            logger.warning(f"Position with ID {position_id} not found")
+            return False
+            
+        try:
+            symbol = position["symbol"]
+            side = position["side"]
+            total_quantity = position["quantity"]
+            entry_price = position["entry_price"]
+            
+            # Calculate quantity to close
+            close_quantity = total_quantity * (percentage / 100.0)
+            remaining_quantity = total_quantity - close_quantity
+            
+            # Determine the closing side
+            close_side = "SELL" if side == "BUY" else "BUY"
+            
+            # For BTCUSDT specifically, ensure correct precision formatting
+            if symbol.upper() == "BTCUSDT":
+                # Force 3 decimal precision for BTCUSDT
+                close_quantity = math.floor(close_quantity * 1000) / 1000
+                remaining_quantity = math.floor(remaining_quantity * 1000) / 1000
+                logger.info(f"Adjusted BTCUSDT quantities: close={close_quantity}, remaining={remaining_quantity}")
+            
+            # Get symbol info for precision
+            symbol_info = self.client.get_exchange_info(symbol)
+            
+            # Find the LOT_SIZE filter
+            lot_size_filter = None
+            for f in symbol_info.get("filters", []):
+                if f.get("filterType") == "LOT_SIZE":
+                    lot_size_filter = f
+                    break
+                    
+            if lot_size_filter:
+                # Get the step size and minimum quantity
+                step_size = float(lot_size_filter.get("stepSize", 0.001))
+                min_qty = float(lot_size_filter.get("minQty", 0.001))
+                
+                # Round to the nearest step size
+                close_quantity = math.floor(close_quantity / step_size) * step_size
+                
+                # Ensure minimum quantity
+                if close_quantity < min_qty:
+                    logger.warning(f"Close quantity {close_quantity} is below minimum {min_qty}. Using minimum.")
+                    close_quantity = min_qty
+                    
+                # Check if remaining would be below minimum
+                if remaining_quantity < min_qty:
+                    logger.warning(f"Remaining quantity {remaining_quantity} would be below minimum {min_qty}. Closing full position instead.")
+                    return self.close_position(position_id)
+            
+            # Execute the closing order
+            response = self.client.execute_order(
+                symbol=symbol,
+                side=close_side,
+                quantity=close_quantity,
+                order_type="MARKET",
+                raw_quantity=True,  # Use exact quantity without formatting
+                reduce_only=True    # Use reduce_only for futures
+            )
+            
+            if response and response.get("orderId"):
+                logger.info(f"Partially closed {side} position for {symbol}, quantity: {close_quantity} ({percentage}%)")
+                
+                # Update position with new quantity
+                for pos in self.positions:
+                    if pos.get("position_id") == position_id:
+                        pos["quantity"] = remaining_quantity
+                        logger.info(f"Updated position quantity to {remaining_quantity}")
+                        break
+                        
+                return True
+            else:
+                logger.error(f"Failed to partially close position: {response}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error partially closing position: {str(e)}")
+            return False
+            
+    def modify_position_sl_tp(self, position_id: str, stop_loss: Optional[float] = None, 
+                             take_profit: Optional[float] = None) -> bool:
+        """
+        Modify stop loss and take profit levels for a position
+        
+        Args:
+            position_id: Unique position identifier
+            stop_loss: New stop loss price
+            take_profit: New take profit price
+            
+        Returns:
+            Whether the SL/TP was modified successfully
+        """
+        logger.info(f"Modifying SL/TP for position with ID: {position_id}")
+        
+        # Find the position by ID
+        position = next((p for p in self.positions if p.get("position_id") == position_id), None)
+        
+        if not position:
+            logger.warning(f"Position with ID {position_id} not found")
+            return False
+            
+        # If neither stop loss nor take profit provided, nothing to do
+        if stop_loss is None and take_profit is None:
+            logger.warning(f"No stop loss or take profit provided for modification")
+            return False
+            
+        try:
+            symbol = position["symbol"]
+            side = position["side"]
+            
+            # Get existing orders to cancel them
+            existing_orders = self.client.get_open_orders(symbol)
+            for order in existing_orders:
+                # Check if it's a stop loss or take profit order for this position
+                if order.get("type") in ["STOP_MARKET", "TAKE_PROFIT_MARKET"]:
+                    # Cancel the order
+                    self.client.cancel_order(symbol, order_id=order.get("orderId"))
+                    logger.info(f"Cancelled existing SL/TP order: {order.get('orderId')}")
+            
+            # Set up new stop loss if provided
+            if stop_loss is not None:
+                # Determine stop loss side (opposite of position side)
+                sl_side = "SELL" if side == "BUY" else "BUY"
+                
+                # Place stop loss order
+                sl_response = self.client.create_stop_loss_order(
+                    symbol=symbol,
+                    side=sl_side,
+                    stop_price=stop_loss,
+                    close_position=True  # Close entire position when triggered
+                )
+                
+                if sl_response and sl_response.get("orderId"):
+                    logger.info(f"Set new stop loss at {stop_loss} for position {position_id}")
+                else:
+                    logger.error(f"Failed to set stop loss: {sl_response}")
+                    
+            # Set up new take profit if provided
+            if take_profit is not None:
+                # Determine take profit side (opposite of position side)
+                tp_side = "SELL" if side == "BUY" else "BUY"
+                
+                # Place take profit order
+                tp_response = self.client.create_take_profit_order(
+                    symbol=symbol,
+                    side=tp_side,
+                    stop_price=take_profit,
+                    close_position=True  # Close entire position when triggered
+                )
+                
+                if tp_response and tp_response.get("orderId"):
+                    logger.info(f"Set new take profit at {take_profit} for position {position_id}")
+                else:
+                    logger.error(f"Failed to set take profit: {tp_response}")
+            
+            # Return true if at least one of SL or TP was set successfully
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error modifying position SL/TP: {str(e)}")
+            return False
         
     def calculate_positions_pnl(self) -> Dict[str, Any]:
         """

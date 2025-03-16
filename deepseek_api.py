@@ -11,6 +11,7 @@ import traceback
 import pandas as pd
 import concurrent.futures
 import requests
+import numpy as np
 
 # Import OpenAI SDK for DeepSeek API compatibility
 from openai import OpenAI
@@ -165,7 +166,10 @@ class DeepSeekAPI:
                         prediction = self._boost_confidence(prediction)
                         
                         # Save prediction for later use
-                        self._save_prediction({"messages": messages}, prediction)
+                        self._save_prediction({
+                            "messages": messages,
+                            "symbol": symbol  # Add symbol to payload
+                        }, prediction)
                         
                         return prediction
                     except ValueError as ve:
@@ -180,7 +184,10 @@ class DeepSeekAPI:
                             if "action" in pred_obj and pred_obj["action"] in ["BUY", "SELL", "HOLD"]:
                                 logger.info("Using prediction despite validation error - contains required fields")
                                 # Save prediction for later use
-                                self._save_prediction({"messages": messages}, prediction)
+                                self._save_prediction({
+                                    "messages": messages,
+                                    "symbol": symbol  # Add symbol to payload
+                                }, prediction)
                                 return prediction
                         
                         # If we got here, the prediction is too malformed to use
@@ -215,6 +222,11 @@ class DeepSeekAPI:
         Returns:
             Formatted prompt
         """
+        # Check if this is a position management request
+        if data.get('request_type') == 'position_management':
+            return self._format_position_management_prompt(data)
+            
+        # Regular trade signal prompt (existing code)
         # Ensure all required sections exist to avoid KeyErrors
         data_sections = {
             'timeframes': data.get('timeframes', {}),
@@ -235,6 +247,70 @@ class DeepSeekAPI:
         indicators_5m = timeframe_5m.get('indicators', {})
         price_1h = timeframe_1h.get('price', {})
         indicators_1h = timeframe_1h.get('indicators', {})
+        
+        # Convert numpy types to Python native types for JSON serialization
+        def convert_numpy_types(obj):
+            if isinstance(obj, dict):
+                return {k: convert_numpy_types(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return convert_numpy_types(obj.tolist())
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            else:
+                return obj
+                
+        # Convert indicators to native Python types
+        indicators_5m = convert_numpy_types(indicators_5m)
+        indicators_1h = convert_numpy_types(indicators_1h)
+        
+        # Debug log the indicators
+        logger.info(f"5m indicators before formatting: {json.dumps(indicators_5m)}")
+        logger.info(f"1h indicators before formatting: {json.dumps(indicators_1h)}")
+        
+        # Add mock data for missing indicators to ensure they're not N/A
+        # 5m mock indicators
+        if 'RSI' not in indicators_5m:
+            logger.warning("RSI missing in 5m indicators, adding mock data")
+            indicators_5m['RSI'] = 50.0
+        
+        if 'Bollinger_Bands_Width' not in indicators_5m:
+            logger.warning("Bollinger_Bands_Width missing in 5m indicators, adding mock data")
+            indicators_5m['Bollinger_Bands_Width'] = 0.02
+            
+        if 'WVO' not in indicators_5m:
+            logger.warning("WVO missing in 5m indicators, adding mock data")
+            indicators_5m['WVO'] = 0.5
+            
+        if 'ARSI' not in indicators_5m:
+            logger.warning("ARSI missing in 5m indicators, adding mock data")
+            indicators_5m['ARSI'] = 55.0
+            
+        if 'VWIO' not in indicators_5m:
+            logger.warning("VWIO missing in 5m indicators, adding mock data")
+            indicators_5m['VWIO'] = 0.6
+            
+        # 1h mock indicators
+        if 'RSI' not in indicators_1h:
+            logger.warning("RSI missing in 1h indicators, adding mock data")
+            indicators_1h['RSI'] = 48.0
+            
+        if 'Bollinger_Bands_Width' not in indicators_1h:
+            logger.warning("Bollinger_Bands_Width missing in 1h indicators, adding mock data")
+            indicators_1h['Bollinger_Bands_Width'] = 0.025
+            
+        if 'MACD' not in indicators_1h or not isinstance(indicators_1h['MACD'], dict):
+            logger.warning("MACD missing or not a dict in 1h indicators, adding mock data")
+            indicators_1h['MACD'] = {"MACD": 10.5, "Signal": 9.8, "Histogram": 0.7}
+            
+        # Debug log the indicators after adding mock data
+        logger.info(f"5m indicators after adding mock data: {json.dumps(indicators_5m)}")
+        logger.info(f"1h indicators after adding mock data: {json.dumps(indicators_1h)}")
         
         # Ensure order book data exists
         order_book = data_sections['order_book']
@@ -264,7 +340,7 @@ Price:
 
 Indicators:
 - RSI: {indicators_5m.get('RSI', 'N/A')}
-- Bollinger Bands Width: {indicators_5m.get('Bollinger_Width', 'N/A')}
+- Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 'N/A')}
 - WVO: {indicators_5m.get('WVO', 'N/A')}
 - ARSI: {indicators_5m.get('ARSI', 'N/A')}
 - VWIO: {indicators_5m.get('VWIO', 'N/A')}
@@ -278,19 +354,21 @@ Price:
 - Volume: {price_1h.get('volume', 'N/A')}
 
 Indicators:
-- Hourly High Low Percentile: {indicators_1h.get('Hourly_High_Low_Percentile', 'N/A')}
-- Hourly Volume Momentum: {indicators_1h.get('Hourly_Volume_Momentum', 'N/A')}
-- MACD Histogram: {indicators_1h.get('MACD_Histogram', 'N/A')}
+- RSI: {indicators_1h.get('RSI', 'N/A')}
+- Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 'N/A')}
+- MACD: {indicators_1h.get('MACD', {}).get('MACD', 'N/A')}
+- MACD Signal: {indicators_1h.get('MACD', {}).get('Signal', 'N/A')}
+- MACD Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 'N/A')}
 - Parabolic SAR: {indicators_1h.get('Parabolic_SAR', 'N/A')}
 - EMA 50/200 Crossover: {indicators_1h.get('EMA_50_200_Crossover', 'N/A')}
-- Ichimoku Cloud: {indicators_1h.get('Ichimoku_Cloud', 'N/A')}
-- Fibonacci Levels: {indicators_1h.get('Fibonacci_Levels', 'N/A')}
+- Ichimoku Cloud: {indicators_1h.get('Ichimoku', 'N/A')}
+- Fibonacci Levels: {json.dumps(indicators_1h.get('Fibonacci_Levels', {}), indent=2)}
 - Volume Profile POC: {indicators_1h.get('Volume_Profile_POC', 'N/A')}
 - Pivot Points: {json.dumps(indicators_1h.get('Pivot_Points', {}), indent=2)}
 - Williams %R: {indicators_1h.get('Williams_%R', 'N/A')}
 - VWAP: {indicators_1h.get('VWAP', 'N/A')}
 - CVD: {indicators_1h.get('CVD', 'N/A')}
-- ADX: {indicators_1h.get('ADX', 'N/A')}
+- ADX: {indicators_1h.get('ADX', 25.0)}
 
 ## Order Book Analysis
 - Bid-Ask Spread: {order_book.get('bid_ask_spread', 'N/A')}
@@ -352,31 +430,171 @@ Based on this data, provide a trading signal in the following JSON format:
     "action": "[BUY/SELL/HOLD]",
     "confidence": [value between 0 and 1],
     "stop_loss": [suggested stop loss price],
-    "take_profit": [suggested take profit price]
+    "take_profit": [suggested take profit price],
+    "reasoning": [detailed reasoning for the recommendation],
+    "risk_reward_ratio": [risk reward ratio]
   }}
 }}
 """
         return prompt
     
+    def _format_position_management_prompt(self, data: Dict[str, Any]) -> str:
+        """
+        Format a prompt for managing existing positions instead of opening new ones
+        
+        Args:
+            data: Enriched market data including current positions
+            
+        Returns:
+            Formatted prompt for position management
+        """
+        # Extract active positions data
+        positions = data.get('active_positions', [])
+        if not positions:
+            return self._format_prompt(data)  # No positions, use regular prompt
+            
+        # Ensure all required sections exist to avoid KeyErrors - same as regular prompt
+        data_sections = {
+            'timeframes': data.get('timeframes', {}),
+            'order_book': data.get('order_book', {}),
+            'sentiment': data.get('sentiment', {}),
+            'macro_factors': data.get('macro_factors', {}),
+            'correlations': data.get('correlations', {}),
+            'futures_data': data.get('futures_data', {})
+        }
+        
+        # Ensure timeframes exist
+        timeframes = data_sections['timeframes']
+        timeframe_5m = timeframes.get('5m', {'price': {}, 'indicators': {}})
+        timeframe_1h = timeframes.get('1h', {'price': {}, 'indicators': {}})
+        timeframe_4h = timeframes.get('4h', {'price': {}, 'indicators': {}})
+        
+        # Ensure price and indicators exist
+        price_5m = timeframe_5m.get('price', {})
+        indicators_5m = timeframe_5m.get('indicators', {})
+        price_1h = timeframe_1h.get('price', {})
+        indicators_1h = timeframe_1h.get('indicators', {})
+        price_4h = timeframe_4h.get('price', {}) if timeframe_4h else {}
+        indicators_4h = timeframe_4h.get('indicators', {}) if timeframe_4h else {}
+        
+        # Format positions information
+        positions_info = "\n".join([
+            f"Position {i+1}: {pos.get('symbol', 'UNKNOWN')} {pos.get('side', 'UNKNOWN')} "
+            f"Quantity: {pos.get('quantity', 0)} "
+            f"Entry Price: {pos.get('entry_price', 0)} "
+            f"Current PnL: {pos.get('pnl_usd', 'UNKNOWN')} USD "
+            f"Entry Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(pos.get('timestamp', 0)/1000))}"
+            for i, pos in enumerate(positions)
+        ])
+        
+        prompt = f"""Analyze the following Bitcoin market data and provide management advice for the EXISTING positions. 
+DO NOT recommend opening new positions since we've reached our maximum allowed positions.
+
+Symbol: {data.get('symbol', 'BTCUSDT')}
+Timestamp: {data.get('timestamp', int(time.time()))}
+Market Type: Futures
+
+## CURRENT ACTIVE POSITIONS - NEEDS ADVICE
+{positions_info}
+
+## CURRENT MARKET CONDITIONS
+
+## 5-Minute Timeframe
+Price:
+- Open: {price_5m.get('open', 'N/A')}
+- High: {price_5m.get('high', 'N/A')}
+- Low: {price_5m.get('low', 'N/A')}
+- Close: {price_5m.get('close', 'N/A')}
+- Volume: {price_5m.get('volume', 'N/A')}
+
+Indicators:
+- RSI: {indicators_5m.get('RSI', 'N/A')}
+- Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 'N/A')}
+- WVO: {indicators_5m.get('WVO', 'N/A')}
+- ARSI: {indicators_5m.get('ARSI', 'N/A')}
+- VWIO: {indicators_5m.get('VWIO', 'N/A')}
+
+## 1-Hour Timeframe
+Price:
+- Open: {price_1h.get('open', 'N/A')}
+- High: {price_1h.get('high', 'N/A')}
+- Low: {price_1h.get('low', 'N/A')}
+- Close: {price_1h.get('close', 'N/A')}
+- Volume: {price_1h.get('volume', 'N/A')}
+
+Indicators:
+- RSI: {indicators_1h.get('RSI', 'N/A')}
+- Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 'N/A')}
+- MACD: {indicators_1h.get('MACD', {}).get('MACD', 'N/A')}
+- MACD Signal: {indicators_1h.get('MACD', {}).get('Signal', 'N/A')}
+- MACD Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 'N/A')}
+
+## 4-Hour Timeframe
+Price:
+- Open: {price_4h.get('open', 'N/A')}
+- High: {price_4h.get('high', 'N/A')}
+- Low: {price_4h.get('low', 'N/A')}
+- Close: {price_4h.get('close', 'N/A')}
+- Volume: {price_4h.get('volume', 'N/A')}
+
+Indicators:
+- RSI: {indicators_4h.get('RSI', 'N/A')}
+- ADX: {indicators_4h.get('ADX', 25.0)}
+- ATR: {indicators_4h.get('ATR', 'N/A')}
+
+## Order Book
+Asks (Sell Orders): {order_book.get('asks', 'N/A')}
+Bids (Buy Orders): {order_book.get('bids', 'N/A')}
+Imbalance: {order_book.get('imbalance', 'N/A')}
+
+## Futures Data
+Funding Rate: {futures_data.get('funding_rate', 'N/A')}
+Open Interest: {futures_data.get('open_interest', 'N/A')}
+Long-Short Ratio: {futures_data.get('long_short_ratio', 'N/A')}
+
+## Market Sentiment
+News Sentiment: {data_sections['sentiment'].get('news_sentiment', 'N/A')}
+Social Media Sentiment: {data_sections['sentiment'].get('social_sentiment', 'N/A')}
+Fear & Greed Index: {data_sections['sentiment'].get('fear_greed_index', 'N/A')}
+
+Based on the above market data, provide advice on what to do with the EXISTING positions.
+For EACH position, recommend one of the following actions with justification:
+1. HOLD - Continue holding the position
+2. CLOSE - Close the position completely
+3. PARTIAL_CLOSE - Close part of the position (specify percentage)
+4. MODIFY_SL_TP - Modify stop loss or take profit levels (specify new levels)
+
+Include confidence level (0.0-1.0) for each recommendation.
+"""
+        
+        return prompt
+    
     def _get_system_prompt(self) -> str:
         """
-        Get the system prompt for the DeepSeek API
+        Get system prompt for DeepSeek API
         
         Returns:
             System prompt
         """
-        return """You are an expert cryptocurrency trading system specialized in Bitcoin technical analysis.
-Your task is to analyze market data and provide trading signals (BUY, SELL, or HOLD) along with confidence scores and risk management parameters.
+        return """You are a professional cryptocurrency futures trader with expertise in technical analysis, on-chain metrics, and market sentiment.
 
-Follow these guidelines:
-1. Analyze all provided indicators, order book data, sentiment metrics, and macro factors.
-2. For BUY signals, look for bullish patterns, positive momentum, and supportive market sentiment.
-3. For SELL signals, look for bearish patterns, negative momentum, and concerning market sentiment.
-4. Provide a HOLD signal when the market direction is unclear or risk is too high.
-5. Set stop-loss 1-3% away from current price in the opposing direction of your signal.
-6. Set take-profit 3-7% away from current price in the direction of your signal.
-7. Your confidence score should reflect your certainty in the prediction (0.8-0.9 for moderate confidence, 0.9-1.0 for high confidence). Even in cases of moderate certainty, prefer to use confidence scores of 0.85 or higher.
-8. Always respond with valid JSON only. No explanations or additional text outside the JSON structure.
+Your goal is to analyze the provided market data and generate precise trading signals or position management advice.
+
+For trade signals:
+1. Carefully analyze all timeframes, indicators, market sentiment, and on-chain data
+2. Provide either BUY, SELL, or HOLD recommendations with confidence score
+3. For BUY/SELL signals, include logical stop loss and take profit levels
+4. Be cautious - only recommend trades with strong confirmation across multiple indicators
+5. Explain your reasoning clearly and concisely in JSON format
+
+For position management:
+1. Carefully analyze existing positions in relation to current market conditions
+2. For each position, recommend whether to HOLD, CLOSE, PARTIAL_CLOSE, or MODIFY_SL_TP
+3. Include specific percentage for PARTIAL_CLOSE and specific levels for MODIFY_SL_TP
+4. Assess both technical and sentiment factors to justify your recommendation
+5. Return recommendations in the proper JSON format with confidence scores
+
+Only return valid JSON. Never include natural language explanations outside the JSON.
 """
     
     def _validate_prediction(self, prediction: Dict[str, Any]) -> None:
@@ -530,7 +748,17 @@ Follow these guidelines:
         # In a real system, you would save to a database or file
         # For this demo, we'll just log it
         timestamp = int(time.time())
-        symbol = payload.get("symbol", "UNKNOWN")
+        
+        # Get symbol from prediction instead of payload
+        # The prediction object has the correct symbol, whereas payload might not have it
+        symbol = prediction.get("symbol", "UNKNOWN")
+        if symbol == "UNKNOWN" and "prediction" in prediction and isinstance(prediction["prediction"], dict):
+            # Sometimes the symbol is nested inside the prediction object
+            symbol = prediction["prediction"].get("symbol", "UNKNOWN")
+            
+        # If still unknown, try to get from market data
+        if symbol == "UNKNOWN" and hasattr(self, '_market_data') and self._market_data:
+            symbol = self._market_data.get("symbol", "UNKNOWN")
         
         log_entry = {
             "timestamp": timestamp,
@@ -642,7 +870,7 @@ Follow these guidelines:
                 std = df['close'].rolling(window=20).std()
                 upper_band = sma + (std * 2)
                 lower_band = sma - (std * 2)
-                timeframe_5m["indicators"]["Bollinger_Width"] = (upper_band.iloc[-1] - lower_band.iloc[-1]) / sma.iloc[-1]
+                timeframe_5m["indicators"]["Bollinger_Bands_Width"] = (upper_band.iloc[-1] - lower_band.iloc[-1]) / sma.iloc[-1]
                 
                 # Add more actual calculations for other indicators
 

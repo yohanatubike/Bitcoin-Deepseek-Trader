@@ -6,11 +6,13 @@ import logging
 import random
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Optional
-from datetime import datetime
+from typing import Dict, Any, List, Optional, Union, Tuple
+from datetime import datetime, timedelta
 from functools import lru_cache
 import json
 import copy
+import os
+import traceback
 
 # Import SantimentAPI
 from santiment_api import SantimentAPI
@@ -45,174 +47,216 @@ class DataEnricher:
         # Add technical indicators
         self._add_technical_indicators(enriched_data)
         
+        # Enhance order book data
+        self._enhance_order_book_data(enriched_data)
+        
+        # Add correlation data
+        self._add_correlation_analysis(enriched_data)
+        
         # Add sentiment data
         self._add_sentiment_data(enriched_data)
         
         # Add macro factors
         self._add_macro_factors(enriched_data)
         
-        # Add futures-specific data if available
-        if "futures_data" in enriched_data:
-            self._add_futures_metrics(enriched_data)
+        # Add on-chain metrics
+        self._add_onchain_metrics(enriched_data)
+        
+        # Add risk metrics
+        self._add_risk_metrics(enriched_data)
+        
+        # Add futures-specific metrics
+        self._add_futures_metrics(enriched_data)
         
         return enriched_data
     
     def _add_technical_indicators(self, data: Dict[str, Any]) -> None:
         """
-        Calculate and add technical indicators to market data
+        Add technical indicators to data dictionary
         
         Args:
             data: Market data dictionary
         """
-        logger.info("🔍 Calculating technical indicators for all timeframes")
-        
-        # Calculate market_structure before other indicators
-        if "timeframes" in data and "1d" in data["timeframes"]:
-            timeframe_1d = data["timeframes"]["1d"]
-            if "price" in timeframe_1d and "klines" in timeframe_1d["price"]:
-                # Create DataFrame
-                df_1d = pd.DataFrame(timeframe_1d["price"]["klines"],
-                                   columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                
-                # Convert to numeric
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df_1d[col] = pd.to_numeric(df_1d[col], errors='coerce')
-                
-                # Initialize indicators
-                if "indicators" not in timeframe_1d:
-                    timeframe_1d["indicators"] = {}
-                
-                # Calculate market structure (trend)
-                if len(df_1d) >= 14:
-                    market_structure = self._calculate_market_structure(df_1d)
-                    timeframe_1d["indicators"]["market_structure"] = market_structure
-                    logger.info(f"📈 Market structure: {market_structure}")
-        
-        # 5-minute timeframe indicators
-        if "timeframes" in data and "5m" in data["timeframes"]:
-            timeframe_5m = data["timeframes"]["5m"]
+        try:
+            # Extract klines for different timeframes
+            klines_5m = data.get("klines", {}).get("5m", [])
+            klines_1h = data.get("klines", {}).get("1h", [])
+            klines_4h = data.get("klines", {}).get("4h", [])
             
-            if "price" in timeframe_5m:
-                price_data = timeframe_5m["price"]
-                if "klines" in price_data:
-                    # Create DataFrame with proper column names
-                    df_5m = pd.DataFrame(price_data["klines"], 
-                                       columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            # Log klines data
+            logger.info(f"Klines data available: 5m={len(klines_5m)}, 1h={len(klines_1h)}, 4h={len(klines_4h)}")
+            
+            timeframes = {}
+            
+            # Initialize timeframes structure if not present
+            if "timeframes" not in data:
+                data["timeframes"] = {}
+                
+            # 5-minute timeframe indicators
+            if klines_5m:
+                try:
+                    # Convert klines to DataFrame
+                    df_5m = self._klines_to_dataframe(klines_5m)
                     
-                    # Convert string values to float
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df_5m[col] = pd.to_numeric(df_5m[col], errors='coerce')
-                    
-                    # Initialize indicators dictionary if not exists
-                    if "indicators" not in timeframe_5m:
-                        timeframe_5m["indicators"] = {}
-                    
-                    # Only calculate if we have enough data points
-                    if len(df_5m) >= 14:  # Minimum for RSI
-                        timeframe_5m["indicators"]["RSI"] = self._calculate_rsi(df_5m['close'])
-                        timeframe_5m["indicators"]["ARSI"] = self._calculate_arsi(df_5m['close'])
-                        timeframe_5m["indicators"]["MACD"] = self._calculate_macd(df_5m['close'])
+                    if len(df_5m) > 0:
+                        # Initialize timeframe dict if not present
+                        if "5m" not in data["timeframes"]:
+                            data["timeframes"]["5m"] = {"price": {}, "indicators": {}}
+                            
+                        timeframe_5m = data["timeframes"]["5m"]
+                        
+                        # Extract and add price data
+                        if "price" not in timeframe_5m:
+                            timeframe_5m["price"] = {}
+                            
+                        # Add latest price data
+                        latest = df_5m.iloc[-1]
+                        timeframe_5m["price"]["open"] = float(latest["open"])
+                        timeframe_5m["price"]["high"] = float(latest["high"])
+                        timeframe_5m["price"]["low"] = float(latest["low"])
+                        timeframe_5m["price"]["close"] = float(latest["close"])
+                        timeframe_5m["price"]["volume"] = float(latest["volume"])
+                        
+                        # Initialize indicators dict if not present
+                        if "indicators" not in timeframe_5m:
+                            timeframe_5m["indicators"] = {}
+                            
+                        # Add 5m indicators
+                        timeframe_5m["indicators"]["RSI"] = self._calculate_rsi(df_5m["close"])
+                        timeframe_5m["indicators"]["Bollinger_Bands_Width"] = self._calculate_bollinger_width(df_5m["close"])
+                        timeframe_5m["indicators"]["WVO"] = self._calculate_vwo(df_5m["volume"])
+                        timeframe_5m["indicators"]["ARSI"] = self._calculate_arsi(df_5m["close"])
+                        timeframe_5m["indicators"]["VWIO"] = self._calculate_vwio(df_5m["volume"])
                         timeframe_5m["indicators"]["ADX"] = self._calculate_adx(df_5m)
+                        logger.info(f"✅ Calculated ADX value for 5m timeframe: {timeframe_5m['indicators']['ADX']}")
                         
-                        # Calculate Stochastic RSI for better short term signals
-                        timeframe_5m["indicators"]["Stoch_RSI"] = self._calculate_stoch_rsi(df_5m['close'])
-                    
-                    if len(df_5m) >= 20:  # Minimum for Bollinger Bands
-                        timeframe_5m["indicators"]["Bollinger_Width"] = self._calculate_bollinger_width(df_5m['close'])
-                        timeframe_5m["indicators"]["Williams_R"] = self._calculate_williams_r(df_5m)
-                        timeframe_5m["indicators"]["VWAP"] = self._calculate_vwap(df_5m)
-                    
-                    if len(df_5m) >= 10:  # Minimum for volume indicators
-                        timeframe_5m["indicators"]["WVO"] = self._calculate_vwo(df_5m['volume'])
-                        timeframe_5m["indicators"]["VWIO"] = self._calculate_vwio(df_5m['volume'])
-                        timeframe_5m["indicators"]["CVD"] = self._calculate_cvd(df_5m)
+                        # Add debugging for all indicators
+                        logger.info(f"✅ 5m indicators: {json.dumps(timeframe_5m.get('indicators', {}))}")
                         
-                    # Calculate momentum score (combined indicator)
-                    if len(df_5m) >= 20:
-                        timeframe_5m["indicators"]["momentum_score"] = self._calculate_momentum_score(df_5m)
-        
-        # 1-hour timeframe indicators
-        if "timeframes" in data and "1h" in data["timeframes"]:
-            timeframe_1h = data["timeframes"]["1h"]
+                        # Continue with other indicators...
+                except Exception as e:
+                    logger.error(f"Error calculating 5m indicators: {e}")
+                    
+            # 1-hour timeframe indicators
+            if klines_1h:
+                try:
+                    # Convert klines to DataFrame
+                    df_1h = self._klines_to_dataframe(klines_1h)
+                    
+                    if len(df_1h) > 0:
+                        # Initialize timeframe dict if not present
+                        if "1h" not in data["timeframes"]:
+                            data["timeframes"]["1h"] = {"price": {}, "indicators": {}}
+                            
+                        timeframe_1h = data["timeframes"]["1h"]
+                        
+                        # Extract and add price data
+                        if "price" not in timeframe_1h:
+                            timeframe_1h["price"] = {}
+                            
+                        # Add latest price data
+                        latest = df_1h.iloc[-1]
+                        timeframe_1h["price"]["open"] = float(latest["open"])
+                        timeframe_1h["price"]["high"] = float(latest["high"])
+                        timeframe_1h["price"]["low"] = float(latest["low"])
+                        timeframe_1h["price"]["close"] = float(latest["close"])
+                        timeframe_1h["price"]["volume"] = float(latest["volume"])
+                        
+                        # Initialize indicators dict if not present
+                        if "indicators" not in timeframe_1h:
+                            timeframe_1h["indicators"] = {}
+                            
+                        # Add 1h indicators
+                        # 1. MACD
+                        timeframe_1h["indicators"]["MACD"] = self._calculate_macd(df_1h["close"])
+                        
+                        # 2. Parabolic SAR
+                        timeframe_1h["indicators"]["Parabolic_SAR"] = self._calculate_parabolic_sar(df_1h["high"], df_1h["low"], df_1h["close"])
+                        
+                        # 3. EMA Crossover
+                        timeframe_1h["indicators"]["EMA_50_200_Crossover"] = self._calculate_ema_crossover(df_1h["close"])
+                        
+                        # 4. Ichimoku Cloud
+                        timeframe_1h["indicators"]["Ichimoku"] = self._calculate_ichimoku(df_1h["high"], df_1h["low"], df_1h["close"])
+                        
+                        # 5. Williams %R
+                        timeframe_1h["indicators"]["Williams_%R"] = self._calculate_williams_r(df_1h)
+                        
+                        # 6. Advanced Directional Index (ADX)
+                        adx_value = self._calculate_adx(df_1h)
+                        timeframe_1h["indicators"]["ADX"] = adx_value
+                        logger.info(f"✅ Calculated ADX value for 1h timeframe: {adx_value}")
+                        
+                        # Add debugging for all indicators
+                        logger.info(f"✅ 5m indicators: {json.dumps(timeframe_5m.get('indicators', {}))}")
+                        logger.info(f"✅ 1h indicators: {json.dumps(timeframe_1h.get('indicators', {}))}")
+                        
+                        # 7. Hourly High Low Percentile (new implementation)
+                        timeframe_1h["indicators"]["Hourly_High_Low_Percentile"] = self._calculate_high_low_percentile(df_1h)
+                        
+                        # 8. Hourly Volume Momentum (new implementation)
+                        timeframe_1h["indicators"]["Hourly_Volume_Momentum"] = self._calculate_volume_momentum(df_1h["volume"])
+                        
+                        # 9. Fibonacci Levels (new implementation)
+                        timeframe_1h["indicators"]["Fibonacci_Levels"] = self._calculate_fibonacci_levels(df_1h)
+                        
+                        # 10. Volume Profile Point of Control (new implementation)
+                        timeframe_1h["indicators"]["Volume_Profile_POC"] = self._calculate_volume_profile_poc(df_1h)
+                        
+                        # 11. Pivot Points (new implementation)
+                        timeframe_1h["indicators"]["Pivot_Points"] = self._calculate_pivot_points(df_1h)
+                        
+                        # 12. VWAP (Volume Weighted Average Price)
+                        timeframe_1h["indicators"]["VWAP"] = self._calculate_vwap(df_1h)
+                        
+                        # 13. CVD (Cumulative Volume Delta)
+                        timeframe_1h["indicators"]["CVD"] = self._calculate_cvd(df_1h)
+                except Exception as e:
+                    logger.error(f"Error calculating 1h indicators: {e}")
             
-            if "price" in timeframe_1h:
-                price_data = timeframe_1h["price"]
-                if "klines" in price_data:
-                    df_1h = pd.DataFrame(price_data["klines"], 
-                                       columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            # 4-hour timeframe indicators
+            if klines_4h:
+                try:
+                    # Convert klines to DataFrame
+                    df_4h = self._klines_to_dataframe(klines_4h)
                     
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df_1h[col] = pd.to_numeric(df_1h[col], errors='coerce')
-                    
-                    if "indicators" not in timeframe_1h:
-                        timeframe_1h["indicators"] = {}
-                    
-                    if len(df_1h) >= 14:
-                        timeframe_1h["indicators"]["RSI"] = self._calculate_rsi(df_1h['close'])
-                        timeframe_1h["indicators"]["EMA_Crossover"] = self._calculate_ema_crossover(df_1h['close'])
-                        timeframe_1h["indicators"]["Ichimoku"] = self._calculate_ichimoku(df_1h['high'], df_1h['low'], df_1h['close'])
-                        timeframe_1h["indicators"]["historical_volatility"] = self._calculate_historical_volatility(df_1h)
-                        timeframe_1h["indicators"]["ATR"] = self._calculate_atr(df_1h)
+                    if len(df_4h) > 0:
+                        # Initialize timeframe dict if not present
+                        if "4h" not in data["timeframes"]:
+                            data["timeframes"]["4h"] = {"price": {}, "indicators": {}}
+                            
+                        timeframe_4h = data["timeframes"]["4h"]
                         
-                        # Add pivot points for futures trading
-                        timeframe_1h["indicators"]["pivot_points"] = self._calculate_pivot_points(df_1h)
-                    
-                    if len(df_1h) >= 20:
-                        timeframe_1h["indicators"]["Bollinger_Width"] = self._calculate_bollinger_width(df_1h['close'])
+                        # Extract and add price data
+                        if "price" not in timeframe_4h:
+                            timeframe_4h["price"] = {}
+                            
+                        # Add latest price data
+                        latest = df_4h.iloc[-1]
+                        timeframe_4h["price"]["open"] = float(latest["open"])
+                        timeframe_4h["price"]["high"] = float(latest["high"])
+                        timeframe_4h["price"]["low"] = float(latest["low"])
+                        timeframe_4h["price"]["close"] = float(latest["close"])
+                        timeframe_4h["price"]["volume"] = float(latest["volume"])
                         
-                    if len(df_1h) >= 10:
-                        timeframe_1h["indicators"]["volume_momentum"] = self._calculate_volume_momentum(df_1h['volume'])
-                    
-                    # Calculate key levels for support/resistance
-                    if len(df_1h) >= 30:
-                        timeframe_1h["indicators"]["key_levels"] = self._identify_key_levels(df_1h)
-                    
-                    # Calculate futures-specific indicators
-                    timeframe_1h["indicators"]["sar_position"] = self._calculate_parabolic_sar(df_1h['high'], df_1h['low'], df_1h['close'])
-                    
-                    if "funding_rate" in data:
-                        timeframe_1h["indicators"]["funding_impact"] = self._calculate_funding_impact(data["funding_rate"])
-                    
-                    # Calculate liquidity zones
-                    timeframe_1h["indicators"]["liquidity_zones"] = self._calculate_liquidity_zones(df_1h)
-                    
-                    # Order flow imbalance score
-                    if len(df_1h) >= 20:
-                        timeframe_1h["indicators"]["order_flow_imbalance"] = self._calculate_order_flow_imbalance(df_1h)
-        
-        # 4-hour timeframe indicators
-        if "timeframes" in data and "4h" in data["timeframes"]:
-            timeframe_4h = data["timeframes"]["4h"]
-            
-            if "price" in timeframe_4h:
-                price_data = timeframe_4h["price"]
-                if "klines" in price_data:
-                    df_4h = pd.DataFrame(price_data["klines"], 
-                                       columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df_4h[col] = pd.to_numeric(df_4h[col], errors='coerce')
-                    
-                    if "indicators" not in timeframe_4h:
-                        timeframe_4h["indicators"] = {}
-                    
-                    # Calculate trend strength indicators
-                    if len(df_4h) >= 14:
+                        # Initialize indicators dict if not present
+                        if "indicators" not in timeframe_4h:
+                            timeframe_4h["indicators"] = {}
+                            
+                        # Add 4h indicators
+                        timeframe_4h["indicators"]["RSI"] = self._calculate_rsi(df_4h["close"])
                         timeframe_4h["indicators"]["ADX"] = self._calculate_adx(df_4h)
-                        timeframe_4h["indicators"]["RSI"] = self._calculate_rsi(df_4h['close'])
                         timeframe_4h["indicators"]["trend_strength"] = self._calculate_trend_strength(df_4h)
-                        
-                        # Futures position sizing indicator
                         timeframe_4h["indicators"]["optimal_leverage"] = self._calculate_optimal_leverage(df_4h)
-                    
-                    # Calculate support/resistance levels
-                    if len(df_4h) >= 30:
                         timeframe_4h["indicators"]["support_resistance"] = self._calculate_support_resistance(df_4h)
-                    
-                    # Calculate potential liquidation levels based on volatility
-                    timeframe_4h["indicators"]["liquidation_risk"] = self._calculate_liquidation_risk(df_4h)
-        
-        logger.info("✅ Technical indicators calculated successfully")
+                        timeframe_4h["indicators"]["liquidation_risk"] = self._calculate_liquidation_risk(df_4h)
+                except Exception as e:
+                    logger.error(f"Error calculating 4h indicators: {e}")
+            
+            logger.info("✅ Technical indicators calculated successfully")
+            
+        except Exception as e:
+            logger.error(f"Error calculating technical indicators: {e}")
     
     def _calculate_market_structure(self, df: pd.DataFrame) -> str:
         """
@@ -901,55 +945,227 @@ class DataEnricher:
         
         Args:
             data: Market data
+        
+        Returns:
+            Sentiment data dictionary
+        """
+        # Use market data to derive sentiment
+        sentiment_data = {}
+        
+        # Get current price movement from 1h timeframe if available
+        price_trend = 0
+        trend_desc = "Neutral"
+        
+        try:
+            if "timeframes" in data and "1h" in data["timeframes"]:
+                timeframe_1h = data["timeframes"]["1h"]
+                
+                # Try multiple approaches to extract price data
+                if "price" in timeframe_1h:
+                    # First approach: Direct price values
+                    if all(k in timeframe_1h["price"] for k in ["open", "close"]):
+                        open_price = float(timeframe_1h["price"]["open"])
+                        close_price = float(timeframe_1h["price"]["close"])
+                        price_trend = (close_price - open_price) / open_price if open_price > 0 else 0
+                    
+                    # Second approach: Klines data
+                    elif "klines" in timeframe_1h["price"] and timeframe_1h["price"]["klines"]:
+                        klines = timeframe_1h["price"]["klines"]
+                        if len(klines) > 1:
+                            # Check klines structure
+                            if isinstance(klines[0], list) and len(klines[0]) >= 5:
+                                # Standard klines format: [timestamp, open, high, low, close, volume]
+                                open_price = float(klines[0][1])
+                                close_price = float(klines[-1][4])
+                            elif isinstance(klines[0], dict) and all(k in klines[0] for k in ["open", "close"]):
+                                # Dictionary format: {"open": value, "close": value, ...}
+                                open_price = float(klines[0]["open"])
+                                close_price = float(klines[-1]["close"])
+                            else:
+                                # Fallback to using first and last items regardless of structure
+                                logger.warning("Unknown klines structure, using fallback method")
+                                # Try to extract first and last items somehow
+                                open_price = 0
+                                close_price = 0
+                                for k in klines[0]:
+                                    if isinstance(klines[0][k], (int, float)) and k != "timestamp":
+                                        open_price = float(klines[0][k])
+                                        break
+                                for k in klines[-1]:
+                                    if isinstance(klines[-1][k], (int, float)) and k != "timestamp":
+                                        close_price = float(klines[-1][k])
+                                        break
+                            
+                            price_trend = (close_price - open_price) / open_price if open_price > 0 else 0
+            
+            # Classify trend based on price change
+            if price_trend > 0.02:
+                trend_desc = "Bullish"
+            elif price_trend < -0.02:
+                trend_desc = "Bearish"
+            else:
+                trend_desc = "Neutral"
+                
+        except Exception as e:
+            logger.error(f"Error calculating price trend: {e}")
+            logger.debug(f"Timeframe data structure: {data.get('timeframes', {}).get('1h', {})}")
+            # Continue with neutral trend as fallback
+            price_trend = 0
+            trend_desc = "Neutral"
+        
+        # Get funding rate from futures data if available
+        funding_rate = 0.0
+        if "futures_data" in data and "funding_rate" in data["futures_data"]:
+            funding_rate = data["futures_data"]["funding_rate"]
+            sentiment_data["funding_rate"] = funding_rate
+            
+            # Interpret funding rate
+            if funding_rate > 0.0008:  # High positive funding rate (>0.08% per 8h)
+                sentiment_data["funding_sentiment"] = "Extremely Bullish"
+            elif funding_rate > 0.0003:  # Moderate positive funding rate
+                sentiment_data["funding_sentiment"] = "Bullish"
+            elif funding_rate < -0.0008:  # High negative funding rate
+                sentiment_data["funding_sentiment"] = "Extremely Bearish"
+            elif funding_rate < -0.0003:  # Moderate negative funding rate
+                sentiment_data["funding_sentiment"] = "Bearish"
+            else:
+                sentiment_data["funding_sentiment"] = "Neutral"
+        
+        # Fear & Greed Index (based on overall market sentiment)
+        # In real implementation, this would be fetched from an external source
+        # For now, we'll use a value that aligns with the price trend
+        if price_trend > 0.05:
+            fear_greed = random.randint(75, 95)  # Extreme Greed
+        elif price_trend > 0.02:
+            fear_greed = random.randint(60, 75)  # Greed
+        elif price_trend < -0.05:
+            fear_greed = random.randint(5, 25)  # Extreme Fear
+        elif price_trend < -0.02:
+            fear_greed = random.randint(25, 40)  # Fear
+        else:
+            fear_greed = random.randint(40, 60)  # Neutral
+            
+        sentiment_data["fear_greed_index"] = fear_greed
+        
+        # Categorize Fear & Greed Index
+        if fear_greed >= 75:
+            sentiment_data["fear_greed_category"] = "Extreme Greed"
+        elif fear_greed >= 60:
+            sentiment_data["fear_greed_category"] = "Greed"
+        elif fear_greed <= 25:
+            sentiment_data["fear_greed_category"] = "Extreme Fear"
+        elif fear_greed <= 40:
+            sentiment_data["fear_greed_category"] = "Fear"
+        else:
+            sentiment_data["fear_greed_category"] = "Neutral"
+        
+        # Add social media sentiment - normally would be from Twitter, Reddit, etc.
+        sentiment_data["social_sentiment"] = self._generate_sentiment_score(trend_desc)
+        sentiment_data["social_volume"] = self._generate_social_volume(trend_desc)
+        
+        # Add news sentiment score (usually from news APIs or sentiment analysis)
+        sentiment_data["news_sentiment"] = self._generate_sentiment_score(trend_desc)
+        sentiment_data["news_sentiment_score"] = self._generate_sentiment_score(trend_desc, as_float=True)
+        
+        # Add whale activity (usually from on-chain data)
+        sentiment_data["whale_activity"] = self._generate_whale_activity()
+        
+        return sentiment_data
+        
+    def _generate_sentiment_score(self, trend: str, as_float: bool = False) -> Union[str, float]:
+        """
+        Generate a sentiment score based on trend
+        
+        Args:
+            trend: Price trend descriptor ("Bullish", "Bearish", "Neutral")
+            as_float: Whether to return as float (-1 to 1) instead of string
             
         Returns:
-            Default sentiment data
+            Sentiment score as string or float
         """
-        # Use basic price action to estimate sentiment
-        try:
-            # Get price data
-            price_5m = data.get("timeframes", {}).get("5m", {}).get("price", {})
-            price_1h = data.get("timeframes", {}).get("1h", {}).get("price", {})
+        if trend == "Bullish":
+            score = random.uniform(0.3, 0.9)
+        elif trend == "Bearish":
+            score = random.uniform(-0.9, -0.3)
+        else:
+            score = random.uniform(-0.3, 0.3)
             
-            # Calculate price changes
-            price_5m_change = 0
-            price_1h_change = 0
+        if as_float:
+            return round(score, 2)
             
-            if price_5m and "open" in price_5m and "close" in price_5m:
-                price_5m_change = (price_5m["close"] - price_5m["open"]) / price_5m["open"] * 100
-                
-            if price_1h and "open" in price_1h and "close" in price_1h:
-                price_1h_change = (price_1h["close"] - price_1h["open"]) / price_1h["open"] * 100
-                
-            # Map price changes to sentiment values
-            sentiment_value = 0
-            if price_5m_change > 1 or price_1h_change > 3:
-                sentiment_value = 0.7  # Positive
-            elif price_5m_change < -1 or price_1h_change < -3:
-                sentiment_value = 0.3  # Negative
-            else:
-                sentiment_value = 0.5  # Neutral
-                
-            # Create mock sentiment data
-            return {
-                "social_sentiment": {
-                    "twitter": sentiment_value,
-                    "reddit": sentiment_value,
-                    "telegram": sentiment_value,
-                    "overall": sentiment_value
-                },
-                "news_sentiment": sentiment_value,
-                "fear_greed_index": 50 + int(sentiment_value * 50),
-                "source": "default"
-            }
+        # Convert to descriptive string
+        if score > 0.6:
+            return "Very Positive"
+        elif score > 0.2:
+            return "Positive"
+        elif score < -0.6:
+            return "Very Negative"
+        elif score < -0.2:
+            return "Negative"
+        else:
+            return "Neutral"
             
-        except Exception as e:
-            logger.error(f"Error generating default sentiment: {str(e)}")
-            # Return empty sentiment data
-            return {
-                "social_sentiment": {},
-                "source": "default"
-            }
+    def _generate_social_volume(self, trend: str) -> int:
+        """
+        Generate a social volume value based on trend
+        
+        Args:
+            trend: Price trend descriptor
+            
+        Returns:
+            Social volume value (number of mentions)
+        """
+        # Base volume - typical daily mentions
+        base_volume = 10000
+        
+        # Adjust based on trend
+        if trend == "Bullish":
+            # More social activity during bull markets
+            multiplier = random.uniform(1.2, 2.0)
+        elif trend == "Bearish":
+            # Less social activity during bearish trends, but still elevated
+            multiplier = random.uniform(0.8, 1.5)
+        else:
+            # Normal activity during neutral periods
+            multiplier = random.uniform(0.7, 1.3)
+            
+        return int(base_volume * multiplier)
+        
+    def _generate_whale_activity(self) -> Dict[str, Any]:
+        """
+        Generate simulated whale activity data
+        
+        Returns:
+            Dictionary with whale activity metrics
+        """
+        # Generate random activity levels
+        large_transactions = random.randint(50, 500)
+        exchange_inflows = random.randint(1000, 10000)
+        exchange_outflows = random.randint(1000, 10000)
+        
+        # Calculate net flow
+        net_flow = exchange_outflows - exchange_inflows
+        
+        # Determine if accumulation or distribution
+        if net_flow > 1000:
+            pattern = "Strong Accumulation"
+        elif net_flow > 0:
+            pattern = "Moderate Accumulation"
+        elif net_flow < -1000:
+            pattern = "Strong Distribution"
+        elif net_flow < 0:
+            pattern = "Moderate Distribution"
+        else:
+            pattern = "Neutral"
+            
+        # Package data
+        return {
+            "large_transactions_24h": large_transactions,
+            "exchange_inflows_btc": exchange_inflows,
+            "exchange_outflows_btc": exchange_outflows,
+            "net_flow_btc": net_flow,
+            "pattern": pattern
+        }
     
     def _add_macro_factors(self, data: Dict[str, Any]) -> None:
         """
@@ -1812,42 +2028,555 @@ class DataEnricher:
         """
         # Make sure we have enough data
         if len(df) < period * 2:
+            logger.warning(f"Not enough data for ADX calculation, need at least {period * 2} bars (current: {len(df)})")
             return 25.0  # Default value if not enough data
             
         try:
-            # Get high, low, close prices
-            high = df['high']
-            low = df['low']
-            close = df['close']
+            # Debug info
+            logger.info(f"ADX calculation - DataFrame shape: {df.shape}")
+            logger.info(f"ADX calculation - DataFrame columns: {df.columns.tolist()}")
+            logger.info(f"ADX calculation - First few rows:\n{df.head(3)}")
             
-            # Calculate price movements
-            plus_dm = high.diff()
-            minus_dm = low.diff(-1).abs()
+            # Make a copy of the data to avoid modifying the original
+            df_copy = df.copy()
             
-            # Calculate directional movement
-            plus_dm[plus_dm < 0] = 0
-            minus_dm[minus_dm < 0] = 0
+            # Ensure high, low, close are float type to avoid calculation issues
+            high = df_copy['high'].astype(float)
+            low = df_copy['low'].astype(float)
+            close = df_copy['close'].astype(float)
             
-            # Calculate true range
+            # Current high minus previous high
+            up_move = high.diff()
+            # Previous low minus current low
+            down_move = low.shift(1) - low
+            
+            # Ensure we don't have negative values
+            up_move = up_move.fillna(0)
+            down_move = down_move.fillna(0)
+            
+            # Calculate +DM and -DM
+            plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+            minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+            
+            # Convert to Series for easier manipulation
+            plus_dm = pd.Series(plus_dm, index=high.index)
+            minus_dm = pd.Series(minus_dm, index=high.index)
+            
+            # Calculate True Range
             tr1 = high - low
             tr2 = (high - close.shift(1)).abs()
             tr3 = (low - close.shift(1)).abs()
             tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
             
-            # Calculate ATR
-            atr = tr.rolling(window=period).mean()
+            # Fill NaN values in TR
+            tr = tr.fillna(tr[~tr.isna()].mean())
             
-            # Calculate plus and minus directional indicators
-            plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
-            minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+            # Calculate smoothed values using Wilder's method
+            # First TR value is just TR, then smoothed
+            atr = tr.copy()
+            plus_di = plus_dm.copy()
+            minus_di = minus_dm.copy()
             
-            # Calculate directional index
-            dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di))
+            # Apply Wilder's smoothing
+            for i in range(1, len(tr)):
+                atr.iloc[i] = (atr.iloc[i-1] * (period-1) + tr.iloc[i]) / period
+                plus_di.iloc[i] = (plus_di.iloc[i-1] * (period-1) + plus_dm.iloc[i]) / period
+                minus_di.iloc[i] = (minus_di.iloc[i-1] * (period-1) + minus_dm.iloc[i]) / period
+            
+            # Calculate +DI and -DI
+            plus_di = 100 * (plus_di / atr)
+            minus_di = 100 * (minus_di / atr)
+            
+            # Replace any NaN values
+            plus_di = plus_di.fillna(0)
+            minus_di = minus_di.fillna(0)
+            
+            # Log intermediate values
+            logger.info(f"ADX calculation - First few values of plus_di: {plus_di.head(3).tolist()}")
+            logger.info(f"ADX calculation - First few values of minus_di: {minus_di.head(3).tolist()}")
+            
+            # Calculate DX
+            dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di)).fillna(0)
             
             # Calculate ADX
-            adx = dx.rolling(window=period).mean().iloc[-1]
+            adx = dx.rolling(window=period).mean()
             
-            return round(adx, 2)
+            # If all values are NaN, use a default
+            if adx.isna().all():
+                logger.warning("ADX calculation resulted in all NaN values, using default")
+                return 25.0
+            
+            # Get the latest non-NaN ADX value
+            valid_adx = adx[~adx.isna()]
+            if len(valid_adx) > 0:
+                adx_value = valid_adx.iloc[-1]
+            else:
+                adx_value = 25.0  # Default value
+                logger.warning("No valid ADX values available, using default")
+            
+            adx_result = round(float(adx_value), 2)
+            logger.info(f"ADX calculation - Final result: {adx_result}")
+            
+            return adx_result
+            
         except Exception as e:
+            logger.error(f"Error calculating ADX: {str(e)}")
+            logger.error(traceback.format_exc())
             # If there's an error, return a default value
-            return 25.0 
+            return 25.0
+    
+    def _calculate_high_low_percentile(self, df: pd.DataFrame, period: int = 24) -> float:
+        """
+        Calculate the percentile of the current price in relation to the high-low range over a period
+        
+        Args:
+            df: DataFrame with price data
+            period: Lookback period (default: 24 hours)
+            
+        Returns:
+            Percentile value (0-100)
+        """
+        try:
+            # Make sure we have enough data
+            if len(df) < period:
+                return 50.0  # Default to middle if not enough data
+                
+            # Get last 'period' candles
+            recent_data = df.tail(period)
+            
+            # Get highest high and lowest low in the period
+            highest_high = recent_data['high'].max()
+            lowest_low = recent_data['low'].min()
+            
+            # Get the range
+            price_range = highest_high - lowest_low
+            
+            if price_range == 0:
+                return 50.0  # If there's no range, return middle value
+                
+            # Get current close price
+            current_price = df['close'].iloc[-1]
+            
+            # Calculate percentile
+            percentile = ((current_price - lowest_low) / price_range) * 100
+            
+            return round(percentile, 2)
+            
+        except Exception as e:
+            logger.error(f"Error calculating high-low percentile: {e}")
+            return 50.0  # Return middle value on error
+
+    def _calculate_fibonacci_levels(self, df: pd.DataFrame, period: int = 20) -> Dict[str, float]:
+        """
+        Calculate Fibonacci retracement and extension levels
+        
+        Args:
+            df: DataFrame with price data
+            period: Period to calculate the swing high and low
+            
+        Returns:
+            Dictionary with Fibonacci levels
+        """
+        try:
+            # Get recent high and low
+            recent_data = df.tail(period)
+            
+            # Find swing high and swing low
+            swing_high = recent_data['high'].max()
+            swing_low = recent_data['low'].min()
+            
+            # Calculate the price range
+            price_range = swing_high - swing_low
+            
+            # Define Fibonacci retracement levels
+            fib_levels = {
+                "trend": "Uptrend" if recent_data['close'].iloc[-1] > recent_data['close'].iloc[0] else "Downtrend",
+                "swing_high": swing_high,
+                "swing_low": swing_low,
+                "fib_0": swing_low,  # 0% retracement
+                "fib_236": swing_low + (price_range * 0.236),  # 23.6% retracement
+                "fib_382": swing_low + (price_range * 0.382),  # 38.2% retracement
+                "fib_50": swing_low + (price_range * 0.5),     # 50% retracement
+                "fib_618": swing_low + (price_range * 0.618),  # 61.8% retracement
+                "fib_786": swing_low + (price_range * 0.786),  # 78.6% retracement
+                "fib_100": swing_high,  # 100% retracement
+                # Extension levels
+                "fib_127": swing_high + (price_range * 0.272),  # 127.2% extension
+                "fib_162": swing_high + (price_range * 0.618),  # 161.8% extension
+            }
+            
+            # Round all values for better readability
+            for key in fib_levels:
+                if isinstance(fib_levels[key], (int, float)) and key != "trend":
+                    fib_levels[key] = round(fib_levels[key], 2)
+                    
+            # Add a key to indicate if current price is near any level
+            current_price = df['close'].iloc[-1]
+            
+            # Identify nearest Fibonacci level
+            nearest_level = "none"
+            nearest_distance = float('inf')
+            
+            for key, value in fib_levels.items():
+                if key != "trend" and key != "swing_high" and key != "swing_low":
+                    distance = abs(current_price - value)
+                    if distance < nearest_distance:
+                        nearest_distance = distance
+                        nearest_level = key
+                        
+            # Check if price is near a Fibonacci level (within 0.5%)
+            price_near_level = nearest_distance / current_price < 0.005
+            
+            fib_levels["nearest_level"] = nearest_level
+            fib_levels["price_near_level"] = price_near_level
+            
+            return fib_levels
+            
+        except Exception as e:
+            logger.error(f"Error calculating Fibonacci levels: {e}")
+            # Return basic placeholder
+            return {
+                "trend": "Unknown",
+                "swing_high": 0,
+                "swing_low": 0,
+                "price_near_level": False
+            }
+
+    def _calculate_volume_profile_poc(self, df: pd.DataFrame, bins: int = 20) -> float:
+        """
+        Calculate Volume Profile Price of Control (POC) - the price level with the highest trading volume
+        
+        Args:
+            df: DataFrame with price data
+            bins: Number of price bins to divide the range into
+            
+        Returns:
+            Price level with highest volume (POC)
+        """
+        try:
+            # Ensure we have enough data
+            if len(df) < bins:
+                return df['close'].iloc[-1]  # Return current price if not enough data
+                
+            # Create price bins
+            price_min = df['low'].min()
+            price_max = df['high'].max()
+            
+            # Avoid division by zero
+            if price_min == price_max:
+                return price_min
+                
+            # Create price bins
+            bin_size = (price_max - price_min) / bins
+            bin_edges = [price_min + i * bin_size for i in range(bins + 1)]
+            
+            # Initialize volume bins
+            volume_bins = [0] * bins
+            
+            # Assign volume to each bin based on close price
+            for i in range(len(df)):
+                price = df['close'].iloc[i]
+                volume = df['volume'].iloc[i]
+                
+                # Find which bin this price falls into
+                bin_index = min(bins - 1, max(0, int((price - price_min) / bin_size)))
+                
+                # Add volume to that bin
+                volume_bins[bin_index] += volume
+            
+            # Find bin with highest volume
+            max_volume_bin = volume_bins.index(max(volume_bins))
+            
+            # Calculate POC (middle of the bin with highest volume)
+            poc = price_min + (max_volume_bin * bin_size) + (bin_size / 2)
+            
+            return round(poc, 2)
+            
+        except Exception as e:
+            logger.error(f"Error calculating Volume Profile POC: {e}")
+            # Return current price as fallback
+            if len(df) > 0:
+                return df['close'].iloc[-1]
+            return 0
+
+    def _add_correlation_analysis(self, data: Dict[str, Any]) -> None:
+        """
+        Add correlation analysis with other assets
+        
+        Args:
+            data: Market data dictionary
+        """
+        logger.info("📊 Adding correlation analysis")
+        
+        try:
+            # In a real system, this would fetch actual correlation data
+            # For now, we'll use realistic but static values
+            
+            # Create correlations object if it doesn't exist
+            if "correlations" not in data:
+                data["correlations"] = {}
+            
+            # Create a dictionary of correlations first
+            correlations = {}
+            
+            # Add BTC-ETH correlation (usually high positive)
+            correlations["btc_eth_correlation"] = round(random.uniform(0.8, 0.95), 2)
+            
+            # Add BTC-SP500 correlation (variable, trending positive in recent years)
+            correlations["btc_sp500_correlation"] = round(random.uniform(0.3, 0.7), 2)
+            
+            # Add BTC-Gold correlation (usually low correlation)
+            correlations["btc_gold_correlation"] = round(random.uniform(-0.2, 0.4), 2)
+            
+            # Add BTC-DXY correlation (usually negative)
+            correlations["btc_dxy_correlation"] = round(random.uniform(-0.7, -0.3), 2)
+            
+            # Process and add descriptions
+            descriptions = {}
+            for key, value in correlations.items():
+                abs_val = abs(value)
+                if abs_val >= 0.7:
+                    strength = "Strong"
+                elif abs_val >= 0.4:
+                    strength = "Moderate"
+                else:
+                    strength = "Weak"
+                    
+                direction = "Positive" if value >= 0 else "Negative"
+                descriptions[f"{key}_desc"] = f"{strength} {direction}"
+            
+            # Update the data dictionary with all correlations and descriptions
+            data["correlations"].update(correlations)
+            data["correlations"].update(descriptions)
+                
+            logger.info("✅ Correlation analysis added")
+            
+        except Exception as e:
+            logger.error(f"Error adding correlation analysis: {e}")
+
+    def _enhance_order_book_data(self, data: Dict[str, Any]) -> None:
+        """
+        Enhance order book data with additional metrics
+        
+        Args:
+            data: Market data dictionary
+        """
+        if "order_book" not in data:
+            logger.warning("No order book data found to enhance")
+            return
+            
+        try:
+            order_book = data["order_book"]
+            
+            # Skip if no bids/asks
+            if "bids" not in order_book or "asks" not in order_book:
+                logger.warning("Incomplete order book data (missing bids or asks)")
+                return
+                
+            # Get bids and asks
+            bids = order_book["bids"]
+            asks = order_book["asks"]
+            
+            # Skip if empty
+            if not bids or not asks:
+                logger.warning("Empty bids or asks in order book")
+                return
+                
+            # Validate data format
+            valid_bids = []
+            valid_asks = []
+            
+            # Process bids
+            for bid in bids:
+                try:
+                    if isinstance(bid, list) and len(bid) >= 2:
+                        price = float(bid[0])
+                        amount = float(bid[1])
+                        valid_bids.append([price, amount])
+                    elif isinstance(bid, dict) and 'price' in bid and 'quantity' in bid:
+                        price = float(bid['price'])
+                        amount = float(bid['quantity'])
+                        valid_bids.append([price, amount])
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Invalid bid format: {bid}, error: {e}")
+                    continue
+            
+            # Process asks
+            for ask in asks:
+                try:
+                    if isinstance(ask, list) and len(ask) >= 2:
+                        price = float(ask[0])
+                        amount = float(ask[1])
+                        valid_asks.append([price, amount])
+                    elif isinstance(ask, dict) and 'price' in ask and 'quantity' in ask:
+                        price = float(ask['price'])
+                        amount = float(ask['quantity'])
+                        valid_asks.append([price, amount])
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Invalid ask format: {ask}, error: {e}")
+                    continue
+            
+            # Skip if no valid data
+            if not valid_bids or not valid_asks:
+                logger.warning("No valid bids or asks after validation")
+                return
+                
+            # Calculate depth imbalance (ratio of bid to ask volume within a specific range)
+            # This helps detect buying/selling pressure at different price levels
+            
+            # For top 10 levels (or all if less than 10)
+            top_n = min(10, len(valid_bids), len(valid_asks))
+            top_bid_volume = sum(bid[1] for bid in valid_bids[:top_n])
+            top_ask_volume = sum(ask[1] for ask in valid_asks[:top_n])
+            
+            # Calculate imbalance (normalized between -1 and 1)
+            # Positive means more buy pressure, negative means more sell pressure
+            if top_bid_volume + top_ask_volume > 0:
+                depth_imbalance = (top_bid_volume - top_ask_volume) / (top_bid_volume + top_ask_volume)
+            else:
+                depth_imbalance = 0
+                
+            order_book["depth_imbalance"] = round(depth_imbalance, 4)
+            
+            # Calculate general bid-ask ratio
+            if top_ask_volume > 0:
+                bid_ask_ratio = top_bid_volume / top_ask_volume
+            else:
+                bid_ask_ratio = 1.0  # Default neutral
+                
+            order_book["bid_ask_ratio"] = round(bid_ask_ratio, 4)
+            
+            # Detect large orders (whales)
+            # First, calculate the average order size
+            all_orders = [bid[1] for bid in valid_bids] + [ask[1] for ask in valid_asks]
+            if all_orders:
+                avg_order_size = sum(all_orders) / len(all_orders)
+                
+                # Define large orders (>5x average)
+                large_order_threshold = avg_order_size * 5
+                
+                # Find large bids and asks
+                large_bids = [{"price": bid[0], "quantity": bid[1]} for bid in valid_bids if bid[1] > large_order_threshold]
+                large_asks = [{"price": ask[0], "quantity": ask[1]} for ask in valid_asks if ask[1] > large_order_threshold]
+                
+                # Add to order book
+                order_book["large_orders"] = {
+                    "bids": large_bids,
+                    "asks": large_asks,
+                    "threshold": large_order_threshold,
+                    "count": len(large_bids) + len(large_asks)
+                }
+            
+            # Calculate price impact for different trade sizes
+            try:
+                # Calculate price impact to sell/buy significant amount
+                # This estimates how much the price would move for a large market order
+                benchmark_amounts = [1, 5, 10, 25, 50]  # in BTC
+                price_impact = {"buy": {}, "sell": {}}
+                
+                # Calculate price impact for buys
+                for amount in benchmark_amounts:
+                    impact_price = self._calculate_price_impact(valid_asks, amount, "buy")
+                    if impact_price and valid_asks and len(valid_asks[0]) >= 1:
+                        best_ask = valid_asks[0][0]
+                        if best_ask > 0:
+                            price_impact["buy"][str(amount)] = round((impact_price - best_ask) / best_ask * 100, 2)
+                
+                # Calculate price impact for sells
+                for amount in benchmark_amounts:
+                    impact_price = self._calculate_price_impact(valid_bids, amount, "sell")
+                    if impact_price and valid_bids and len(valid_bids[0]) >= 1:
+                        best_bid = valid_bids[0][0]
+                        if best_bid > 0:
+                            price_impact["sell"][str(amount)] = round((best_bid - impact_price) / best_bid * 100, 2)
+                
+                order_book["price_impact"] = price_impact
+            except Exception as e:
+                logger.error(f"Error calculating price impact: {e}")
+            
+            logger.info("✅ Enhanced order book data with advanced metrics")
+            
+        except Exception as e:
+            logger.error(f"Error enhancing order book data: {e}")
+    
+    def _calculate_price_impact(self, orders: List[List[float]], target_amount: float, side: str) -> Optional[float]:
+        """
+        Calculate the average price after executing a market order of target_amount
+        
+        Args:
+            orders: List of [price, amount] lists
+            target_amount: Target amount to buy/sell
+            side: "buy" or "sell"
+            
+        Returns:
+            Impact price or None if not enough liquidity
+        """
+        try:
+            cumulative_amount = 0
+            cumulative_value = 0
+            
+            for order in orders:
+                if len(order) < 2:
+                    continue
+                
+                price, amount = order[0], order[1]
+                
+                # How much of this order will be filled
+                available_amount = min(amount, target_amount - cumulative_amount)
+                if available_amount <= 0:
+                    break
+                
+                # Add to cumulative
+                cumulative_amount += available_amount
+                cumulative_value += available_amount * price
+                
+                # Check if we've reached the target
+                if cumulative_amount >= target_amount:
+                    # Return the average price
+                    return cumulative_value / cumulative_amount
+            
+            # Not enough liquidity
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error calculating price impact: {e}")
+            return None
+    
+    def _klines_to_dataframe(self, klines):
+        """
+        Convert klines data to pandas DataFrame
+        
+        Args:
+            klines: List of klines from Binance API
+            
+        Returns:
+            pandas DataFrame with OHLCV data
+        """
+        try:
+            import pandas as pd
+            
+            # Create DataFrame
+            df = pd.DataFrame(klines, columns=[
+                'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+            ])
+            
+            # Convert types
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df['open'] = df['open'].astype(float)
+            df['high'] = df['high'].astype(float)
+            df['low'] = df['low'].astype(float)
+            df['close'] = df['close'].astype(float)
+            df['volume'] = df['volume'].astype(float)
+            
+            # Set timestamp as index
+            df.set_index('timestamp', inplace=True)
+            
+            return df
+        except Exception as e:
+            logger.error(f"Error converting klines to DataFrame: {e}")
+            # Return empty DataFrame
+            import pandas as pd
+            return pd.DataFrame()
+        

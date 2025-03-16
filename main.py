@@ -270,7 +270,37 @@ class TradingBot:
             logger.info("🔍 Enriched market data with technical indicators")
             
             # 4. Get prediction from DeepSeek
-            prediction = self.deepseek_api.get_prediction(enriched_data)
+            # Check for existing positions first to determine request type
+            existing_positions = self.trade_executor.get_active_positions()
+            existing_count = len(existing_positions)
+            
+            # If we've reached max positions, switch to position management mode
+            if existing_count >= self.max_positions:
+                logger.info(f"Maximum positions reached ({existing_count}/{self.max_positions}). Switching to position management mode.")
+                # Calculate PnL for active positions
+                positions_pnl = self.trade_executor.calculate_positions_pnl()
+                
+                # Add position data and PnL to each position for better advice
+                for position in existing_positions:
+                    symbol = position.get("symbol")
+                    position_id = position.get("position_id")
+                    # Find PnL for this position
+                    for p in positions_pnl.get("positions", []):
+                        if p.get("position_id") == position_id:
+                            position["pnl_usd"] = p.get("pnl_usd", 0)
+                            position["pnl_percent"] = p.get("pnl_percent", 0)
+                            break
+                
+                # Add active positions to the market data
+                enriched_data["active_positions"] = existing_positions
+                enriched_data["request_type"] = "position_management"
+                
+                logger.info("Requesting position management advice from DeepSeek API")
+                prediction = self.deepseek_api.get_prediction(enriched_data)
+            else:
+                # Normal prediction request for new trades
+                logger.info("Requesting trading signals from DeepSeek API")
+                prediction = self.deepseek_api.get_prediction(enriched_data)
             
             if not prediction:
                 logger.error("❌ No prediction received")
@@ -311,29 +341,81 @@ class TradingBot:
             if confidence >= self.confidence_threshold:
                 logger.info(f"✅ Confidence {confidence:.2f} meets threshold {self.confidence_threshold}")
                 
-                # Check for existing positions first
-                existing_positions = self.trade_executor.get_active_positions()
-                existing_count = len(existing_positions)
-                
-                if existing_count >= self.max_positions and action != "HOLD":
-                    logger.warning(f"⚠️ Maximum positions reached ({existing_count}/{self.max_positions})")
-                else:
-                    # Execute the trade
-                    success = self.trade_executor.execute_trade(
-                        symbol=self.symbol,
-                        action=action,
-                        confidence=confidence,
-                        confidence_threshold=self.confidence_threshold,
-                        stop_loss=stop_loss,
-                        take_profit=take_profit,
-                        volatility=volatility
-                    )
+                # Handle prediction based on request type
+                if enriched_data.get("request_type") == "position_management":
+                    # Handle position management advice
+                    logger.info("Processing position management advice")
                     
-                    if success:
-                        logger.info(f"✅ Successfully executed {action} trade for {self.symbol}")
-                        self.session_trades_count += 1
+                    # Check if we have position-specific recommendations
+                    position_recommendations = prediction.get("position_recommendations", [])
+                    
+                    if position_recommendations:
+                        # Process each position recommendation
+                        for rec in position_recommendations:
+                            position_id = rec.get("position_id")
+                            action = rec.get("action", "HOLD")
+                            confidence = rec.get("confidence", 0)
+                            
+                            if not position_id or confidence < self.confidence_threshold:
+                                continue
+                                
+                            # Find the position
+                            position = next((p for p in existing_positions if p.get("position_id") == position_id), None)
+                            
+                            if not position:
+                                logger.warning(f"Position with ID {position_id} not found")
+                                continue
+                                
+                            # Apply the recommendation
+                            if action == "CLOSE":
+                                logger.info(f"Closing position {position_id} based on recommendation")
+                                # TODO: Implement close_position method in trade_executor
+                                # self.trade_executor.close_position(position_id)
+                                self.trade_executor.close_position(position_id)
+                            elif action == "PARTIAL_CLOSE":
+                                percentage = rec.get("percentage", 50)
+                                logger.info(f"Partially closing position {position_id} ({percentage}%)")
+                                # TODO: Implement partial_close_position in trade_executor
+                                # self.trade_executor.partial_close_position(position_id, percentage)
+                                self.trade_executor.partial_close_position(position_id, percentage)
+                            elif action == "MODIFY_SL_TP":
+                                stop_loss = rec.get("stop_loss")
+                                take_profit = rec.get("take_profit")
+                                logger.info(f"Modifying SL/TP for position {position_id}")
+                                # TODO: Implement modify_position_sl_tp in trade_executor
+                                # self.trade_executor.modify_position_sl_tp(position_id, stop_loss, take_profit)
+                                self.trade_executor.modify_position_sl_tp(position_id, stop_loss, take_profit)
+                            else:
+                                logger.info(f"Holding position {position_id} as recommended")
                     else:
-                        logger.warning(f"⚠️ Failed to execute {action} trade for {self.symbol}")
+                        # Generic recommendation for all positions
+                        action = prediction.get("action", "HOLD")
+                        
+                        if action == "CLOSE_ALL":
+                            logger.info("Closing all positions based on recommendation")
+                            self.trade_executor.close_all_positions()
+                else:
+                    # Normal trade execution (existing code)
+                    # Check for existing positions first
+                    if existing_count >= self.max_positions and action != "HOLD":
+                        logger.warning(f"⚠️ Maximum positions reached ({existing_count}/{self.max_positions})")
+                    else:
+                        # Execute the trade
+                        success = self.trade_executor.execute_trade(
+                            symbol=self.symbol,
+                            action=action,
+                            confidence=confidence,
+                            confidence_threshold=self.confidence_threshold,
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
+                            volatility=volatility
+                        )
+                        
+                        if success:
+                            logger.info(f"✅ Successfully executed {action} trade for {self.symbol}")
+                            self.session_trades_count += 1
+                        else:
+                            logger.warning(f"⚠️ Failed to execute {action} trade for {self.symbol}")
             else:
                 logger.info(f"⏸️ Confidence {confidence:.2f} below threshold {self.confidence_threshold}, no trade executed")
                 
