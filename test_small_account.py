@@ -6,6 +6,7 @@ Test script to verify the bug fixes for small accounts and SELL orders
 import logging
 import sys
 import traceback
+import configparser
 from binance_client import BinanceClient
 from trade_executor import TradeExecutor
 
@@ -17,15 +18,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def load_config():
+    """Load configuration from config.ini"""
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+    return config
+
 def test_small_account_position_sizing():
     """Test position sizing with a small account"""
     try:
-        # Initialize Binance client with default test settings
+        # Load configuration
+        config = load_config()
+        
+        # Initialize Binance client with test settings
         binance_client = BinanceClient(
-            api_key="YOUR_API_KEY",
-            api_secret="YOUR_API_SECRET",
-            symbol="BTCUSDT",
-            use_testnet=True
+            api_key=config['binance']['api_key'],
+            api_secret=config['binance']['api_secret'],
+            testnet=config.getboolean('binance', 'testnet'),
+            symbol="BTCUSDT"
         )
         
         # Create a TradeExecutor with lower leverage (5x) for testing

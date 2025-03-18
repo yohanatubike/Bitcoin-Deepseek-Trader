@@ -563,7 +563,6 @@ class TradeExecutor:
             Whether the order was successful
         """
         try:
-            # For futures, we can directly sell (short)
             # Get current market price
             current_price = self.client.get_current_price(symbol)
             
@@ -571,15 +570,30 @@ class TradeExecutor:
                 logger.error(f"Invalid current price: {current_price}")
                 return False
                 
-            # IMPORTANT: The quantity is already in BTC, not USDT
-            # Calculate USD value for logging purposes
+            # Calculate USD value
             usd_value = quantity * current_price
             
-            # Log the actual values we're working with
-            logger.info(f"Using pre-calculated quantity: {quantity} {symbol[:-4]} at price {current_price} (value: {usd_value:.2f} USDT)")
+            # Get account info to check available margin
+            account_info = self.client.get_account_info()
+            available_balance = float(account_info.get("availableBalance", 0))
             
-            # Check minimum notional value (Binance Futures requires minimum order value of 5 USDT)
-            min_notional = 5.0  # Minimum for BTCUSDT is 5 USDT
+            # Calculate required margin with buffer
+            required_margin = (usd_value / self.leverage) * 1.15  # 15% buffer
+            
+            logger.info(f"Available balance: ${available_balance:.2f}, Required margin: ${required_margin:.2f}")
+            
+            if required_margin > available_balance * 0.9:  # Only use 90% of available balance
+                # Adjust quantity to fit available margin
+                safe_margin = available_balance * 0.85  # Use 85% of available balance
+                max_position_value = safe_margin * self.leverage
+                new_quantity = max_position_value / current_price
+                
+                logger.warning(f"Reducing quantity from {quantity} to {new_quantity} due to margin constraints")
+                quantity = new_quantity
+                usd_value = quantity * current_price
+            
+            # Check minimum notional value (5 USDT for BTCUSDT)
+            min_notional = 5.0
             
             if usd_value < min_notional:
                 logger.warning(f"Order value {usd_value:.2f} USDT is below minimum {min_notional} USDT. Adjusting quantity.")
@@ -591,69 +605,48 @@ class TradeExecutor:
             symbol_info = self.client.get_exchange_info(symbol)
             
             if not symbol_info or not isinstance(symbol_info, dict) or not symbol_info.get("filters"):
-                logger.error(f"Symbol info not found or invalid for {symbol}")
-                # Try directly accessing symbol filters from the client
-                try:
-                    # Use default precision as fallback
-                    logger.warning(f"Using default precision values for {symbol}")
-                    step_size = 0.001  # Standard BTC step size
-                    min_qty = 0.001    # Standard BTC minimum quantity
-                    
-                    # Round to the nearest step size using ceiling to ensure min notional
-                    quantity = math.ceil(quantity / step_size) * step_size
-                    
-                    # Ensure minimum quantity
-                    if quantity < min_qty:
-                        logger.warning(f"Calculated quantity {quantity} is below minimum {min_qty}. Using minimum.")
-                        quantity = min_qty
-                except Exception as e:
-                    logger.error(f"Error using default precision: {str(e)}")
-                    return False
+                logger.warning(f"Using default precision values for {symbol}")
+                step_size = 0.001
+                min_qty = 0.001
             else:
                 # Find the LOT_SIZE filter
-                lot_size_filter = None
-                for f in symbol_info.get("filters", []):
-                    if f.get("filterType") == "LOT_SIZE":
-                        lot_size_filter = f
-                        break
+                lot_size_filter = next((f for f in symbol_info.get("filters", []) if f.get("filterType") == "LOT_SIZE"), None)
                 
                 if not lot_size_filter:
-                    logger.error(f"LOT_SIZE filter not found for {symbol}")
-                    # Use default values
+                    logger.warning(f"Using default precision values for {symbol}")
                     step_size = 0.001
                     min_qty = 0.001
                 else:
-                    # Get the step size and minimum quantity
                     step_size = float(lot_size_filter.get("stepSize", 0.001))
                     min_qty = float(lot_size_filter.get("minQty", 0.001))
-                
-                # Round to the nearest step size using ceiling to ensure min notional
-                quantity = math.ceil(quantity / step_size) * step_size
-                
-                # Ensure minimum quantity
-                if quantity < min_qty:
-                    logger.warning(f"Calculated quantity {quantity} is below minimum {min_qty}. Using minimum.")
-                    quantity = min_qty
             
-            # Final check: ensure minimum notional value is met
-            final_order_value = quantity * current_price
-            if final_order_value < min_notional:
-                logger.warning(f"Final order value {final_order_value:.2f} USDT still below minimum {min_notional} USDT after adjustments.")
-                # Force minimum notional value with safety buffer
-                quantity = (min_notional / current_price) * 1.05  # Add 5% buffer to be safe
-                # Round up to nearest step size
-                quantity = math.ceil(quantity / step_size) * step_size
-                logger.info(f"Forced quantity to {quantity} to ensure minimum notional value")
-                
+            # Round to the nearest step size
+            quantity = math.floor(quantity / step_size) * step_size
+            
+            # Ensure minimum quantity
+            if quantity < min_qty:
+                logger.warning(f"Quantity {quantity} is below minimum {min_qty}. Cannot execute order.")
+                return False
+            
             # Set leverage first
             try:
-                self.client.set_leverage(symbol, self.leverage)
-                logger.info(f"Set leverage to {self.leverage}x for {symbol}")
+                current_leverage = float(self.client.get_leverage(symbol))
+                if current_leverage != self.leverage:
+                    self.client.set_leverage(symbol, self.leverage)
+                    logger.info(f"Set leverage to {self.leverage}x for {symbol}")
             except Exception as e:
                 logger.warning(f"Could not set leverage: {str(e)}")
             
             # Execute the order
             logger.info(f"Executing SELL (SHORT) order for {symbol}: {quantity} at ~{current_price} USDT (value: {quantity * current_price:.2f} USDT)")
+            
+            # Set margin type to ISOLATED if not already set
+            try:
+                self.client.set_margin_type(symbol, "ISOLATED")
+                logger.info("Set margin type to ISOLATED")
+            except Exception as e:
+                if "No need to change margin type" not in str(e):
+                    logger.warning(f"Could not set margin type: {str(e)}")
             
             response = self.client.execute_order(
                 symbol=symbol,
