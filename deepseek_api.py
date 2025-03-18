@@ -197,59 +197,118 @@ class DeepSeekAPI:
             # Format prompt
             prompt = f"""Please analyze the following market data for {market_data.get('symbol', 'BTCUSDT')} and provide trading signals:
 
-5-Minute Timeframe Indicators:
-- RSI: {indicators_5m.get('RSI', 50.0):.2f}
-- Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 0.02):.4f}
-- Volume Weighted Oscillator (WVO): {indicators_5m.get('WVO', 0.0):.2f}
-- Adaptive RSI (ARSI): {indicators_5m.get('ARSI', 50.0):.2f}
-- Volume Weighted Intensity (VWIO): {indicators_5m.get('VWIO', 0.0):.2f}
-- ADX: {indicators_5m.get('ADX', 25.0):.2f}
+            5-Minute Timeframe Indicators:
+            Momentum:
+            - RSI: {indicators_5m.get('RSI', 50.0):.2f}
+            - Adaptive RSI (ARSI): {indicators_5m.get('ARSI', 50.0):.2f}
+            - Stochastic RSI: {indicators_5m.get('Stoch_RSI', {}).get('K', 0.0):.2f}/{indicators_5m.get('Stoch_RSI', {}).get('D', 0.0):.2f}
+            
+            Volatility:
+            - Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 0.02):.4f}
+            - ATR: {indicators_5m.get('ATR', 0.0):.2f}
+            - Historical Volatility: {indicators_5m.get('Historical_Volatility', 0.0):.4f}
+            
+            Volume:
+            - Volume Weighted Oscillator (WVO): {indicators_5m.get('WVO', 0.0):.2f}
+            - Volume Weighted Intensity (VWIO): {indicators_5m.get('VWIO', 0.0):.2f}
+            - Volume Profile POC: {indicators_5m.get('Volume_Profile_POC', 0.0):.2f}
+            
+            Trend:
+            - ADX: {indicators_5m.get('ADX', 25.0):.2f}
+            - Trend Strength: {indicators_5m.get('Trend_Strength', {}).get('value', 0.0):.2f}
+            - Market Structure: {indicators_5m.get('Market_Structure', 'NEUTRAL')}
 
-1-Hour Timeframe Indicators:
-- RSI: {indicators_1h.get('RSI', 48.0):.2f}
-- Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 0.025):.4f}
-- MACD:
-  * MACD Line: {indicators_1h.get('MACD', {}).get('MACD', 0.0):.2f}
-  * Signal Line: {indicators_1h.get('MACD', {}).get('Signal', 0.0):.2f}
-  * Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 0.0):.2f}
-- Parabolic SAR: {indicators_1h.get('Parabolic_SAR', 'NEUTRAL')}
-- EMA 50/200 Crossover: {indicators_1h.get('EMA_50_200_Crossover', 'NEUTRAL')}
-- Williams %R: {indicators_1h.get('Williams_%R', -50.0):.2f}
-- ADX: {indicators_1h.get('ADX', 25.0):.2f}
+            1-Hour Timeframe Indicators:
+            Momentum:
+            - RSI: {indicators_1h.get('RSI', 48.0):.2f}
+            - Williams %R: {indicators_1h.get('Williams_%R', -50.0):.2f}
+            - Stochastic RSI: {indicators_1h.get('Stoch_RSI', {}).get('K', 0.0):.2f}/{indicators_1h.get('Stoch_RSI', {}).get('D', 0.0):.2f}
+            
+            Volatility:
+            - Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 0.025):.4f}
+            - ATR: {indicators_1h.get('ATR', 0.0):.2f}
+            - Historical Volatility: {indicators_1h.get('Historical_Volatility', 0.0):.4f}
+            
+            Trend:
+            - MACD:
+              * MACD Line: {indicators_1h.get('MACD', {}).get('MACD', 0.0):.2f}
+              * Signal Line: {indicators_1h.get('MACD', {}).get('Signal', 0.0):.2f}
+              * Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 0.0):.2f}
+            - Parabolic SAR: {indicators_1h.get('Parabolic_SAR', 'NEUTRAL')}
+            - EMA 50/200 Crossover: {indicators_1h.get('EMA_50_200_Crossover', 'NEUTRAL')}
+            - ADX: {indicators_1h.get('ADX', 25.0):.2f}
+            - Trend Strength: {indicators_1h.get('Trend_Strength', {}).get('value', 0.0):.2f}
+            - Market Structure: {indicators_1h.get('Market_Structure', 'NEUTRAL')}
+            
+            Advanced Indicators:
+            - Ichimoku Cloud Status: {indicators_1h.get('Ichimoku', 'NEUTRAL')}
+            - Hourly High/Low Percentile: {indicators_1h.get('Hourly_High_Low_Percentile', 0.0):.2f}
+            - Hourly Volume Momentum: {indicators_1h.get('Hourly_Volume_Momentum', 0.0):.2f}
+            
+            Support/Resistance:
+            - Key Support: {indicators_1h.get('Support_Resistance', {}).get('support', 0.0):.2f}
+            - Key Resistance: {indicators_1h.get('Support_Resistance', {}).get('resistance', 0.0):.2f}
+            - Fibonacci Levels:
+              * 0.236: {indicators_1h.get('Fibonacci_Levels', {}).get('0.236', 0.0):.2f}
+              * 0.382: {indicators_1h.get('Fibonacci_Levels', {}).get('0.382', 0.0):.2f}
+              * 0.618: {indicators_1h.get('Fibonacci_Levels', {}).get('0.618', 0.0):.2f}
+            
+            Order Book Analysis:
+            Volume Analysis:
+            - Bid/Ask Ratio: {order_book_metrics.get('bid_ask_ratio', 1.0):.4f}
+            - Order Imbalance: {order_book_metrics.get('order_imbalance', 0.0):.4f}
+            - Order Flow Score: {order_book_metrics.get('order_flow_score', 0.0):.2f}
+            
+            Price Analysis:
+            - Spread: {order_book_metrics.get('spread', 0.0):.2f}
+            - Spread %: {order_book_metrics.get('spread_percentage', 0.0):.4f}%
+            - VWAP Analysis:
+              * Bid VWAP: {order_book_metrics.get('bid_vwap', 0.0):.2f}
+              * Ask VWAP: {order_book_metrics.get('ask_vwap', 0.0):.2f}
+              * VWAP Midpoint: {order_book_metrics.get('vwap_midpoint', 0.0):.2f}
+            
+            Liquidity Analysis:
+            - Liquidity Score: {order_book_metrics.get('liquidity_score', 0.0):.2f}
+            - Depth Imbalance: {order_book_metrics.get('depth_imbalance', 0.0):.4f}
+            - Large Orders Impact: {order_book_metrics.get('large_orders_impact', 0.0):.2f}
 
-Order Book Analysis:
-- Bid/Ask Ratio: {order_book_metrics.get('bid_ask_ratio', 1.0):.4f}
-- Order Imbalance: {order_book_metrics.get('order_imbalance', 0.0):.4f}
-- Spread: {order_book_metrics.get('spread', 0.0):.2f}
-- Spread %: {order_book_metrics.get('spread_percentage', 0.0):.4f}%
-- VWAP:
-  * Bid VWAP: {order_book_metrics.get('bid_vwap', 0.0):.2f}
-  * Ask VWAP: {order_book_metrics.get('ask_vwap', 0.0):.2f}
-  * VWAP Midpoint: {order_book_metrics.get('vwap_midpoint', 0.0):.2f}
+            Futures Data:
+            - Funding Rate: {market_data.get('futures_data', {}).get('funding_rate', 0.0):.6f}
+            - Next Funding Time: {market_data.get('futures_data', {}).get('next_funding_time', 'Unknown')}
+            - Open Interest: {market_data.get('futures_data', {}).get('open_interest', 0.0):.2f}
+            - Open Interest Value: ${market_data.get('futures_data', {}).get('open_interest_value', 0.0):.2f}
+            - Long/Short Ratio: {market_data.get('futures_data', {}).get('long_short_ratio', 1.0):.2f}
 
-Futures Data:
-- Funding Rate: {market_data.get('futures_data', {}).get('funding_rate', 0.0):.6f}
-- Next Funding Time: {market_data.get('futures_data', {}).get('next_funding_time', 'Unknown')}
-- Open Interest: {market_data.get('futures_data', {}).get('open_interest', 0.0):.2f}
-- Open Interest Value: ${market_data.get('futures_data', {}).get('open_interest_value', 0.0):.2f}
+            Based on this comprehensive market data, please provide:
+            1. Trading action (BUY/SELL/HOLD)
+            2. Confidence level (0.0-1.0)
+            3. Suggested stop loss price
+            4. Suggested take profit price
+            5. Detailed reasoning for the recommendation, considering:
+               - Trend analysis across timeframes
+               - Support/Resistance levels
+               - Volume and liquidity analysis
+               - Market structure
+               - Risk factors
+            6. Risk/reward ratio for the trade
+            7. Position sizing recommendation (0.0-1.0)
 
-Based on this data, please provide:
-1. Trading action (BUY/SELL/HOLD)
-2. Confidence level (0.0-1.0)
-3. Suggested stop loss price
-4. Suggested take profit price
-5. Brief reasoning for the recommendation
-6. Risk/reward ratio for the trade
-
-Please format your response as a JSON object with the following structure:
-{{
-    "action": "BUY/SELL/HOLD",
-    "confidence": 0.XX,
-    "stop_loss": XXX.XX,
-    "take_profit": XXX.XX,
-    "reasoning": "Your analysis here",
-    "risk_reward_ratio": X.XX
-}}"""
+            Please format your response as a JSON object with the following structure:
+            {{
+                "action": "BUY/SELL/HOLD",
+                "confidence": 0.XX,
+                "stop_loss": XXX.XX,
+                "take_profit": XXX.XX,
+                "reasoning": "Your detailed analysis here",
+                "risk_reward_ratio": X.XX,
+                "position_size": 0.XX,
+                "risk_factors": ["factor1", "factor2", ...],
+                "key_levels": {{
+                    "support": XXX.XX,
+                    "resistance": XXX.XX
+                }}
+            }}
+            """
             
             return prompt
             
@@ -276,66 +335,66 @@ Please format your response as a JSON object with the following structure:
             # Format prompt
             prompt = f"""Please analyze the following market data and provide position management advice for {data.get('symbol', 'BTCUSDT')}:
 
-Current Position:
-- Side: {position.get('side', 'UNKNOWN')}
-- Entry Price: {position.get('entry_price', 0.0):.2f}
-- Current Price: {position.get('mark_price', 0.0):.2f}
-- Unrealized PnL: {position.get('unrealized_pnl', 0.0):.2f} ({position.get('roe', 0.0):.2f}%)
-- Position Size: {position.get('size', 0.0):.8f}
-- Leverage: {position.get('leverage', 1)}x
-- Margin Type: {position.get('margin_type', 'ISOLATED')}
+            Current Position:
+            - Side: {position.get('side', 'UNKNOWN')}
+            - Entry Price: {position.get('entry_price', 0.0):.2f}
+            - Current Price: {position.get('mark_price', 0.0):.2f}
+            - Unrealized PnL: {position.get('unrealized_pnl', 0.0):.2f} ({position.get('roe', 0.0):.2f}%)
+            - Position Size: {position.get('size', 0.0):.8f}
+            - Leverage: {position.get('leverage', 1)}x
+            - Margin Type: {position.get('margin_type', 'ISOLATED')}
 
-5-Minute Timeframe Indicators:
-- RSI: {indicators_5m.get('RSI', 50.0):.2f}
-- Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 0.02):.4f}
-- Volume Weighted Oscillator (WVO): {indicators_5m.get('WVO', 0.0):.2f}
-- Adaptive RSI (ARSI): {indicators_5m.get('ARSI', 50.0):.2f}
-- Volume Weighted Intensity (VWIO): {indicators_5m.get('VWIO', 0.0):.2f}
-- ADX: {indicators_5m.get('ADX', 25.0):.2f}
+            5-Minute Timeframe Indicators:
+            - RSI: {indicators_5m.get('RSI', 50.0):.2f}
+            - Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 0.02):.4f}
+            - Volume Weighted Oscillator (WVO): {indicators_5m.get('WVO', 0.0):.2f}
+            - Adaptive RSI (ARSI): {indicators_5m.get('ARSI', 50.0):.2f}
+            - Volume Weighted Intensity (VWIO): {indicators_5m.get('VWIO', 0.0):.2f}
+            - ADX: {indicators_5m.get('ADX', 25.0):.2f}
 
-1-Hour Timeframe Indicators:
-- RSI: {indicators_1h.get('RSI', 48.0):.2f}
-- Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 0.025):.4f}
-- MACD:
-  * MACD Line: {indicators_1h.get('MACD', {}).get('MACD', 0.0):.2f}
-  * Signal Line: {indicators_1h.get('MACD', {}).get('Signal', 0.0):.2f}
-  * Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 0.0):.2f}
-- Parabolic SAR: {indicators_1h.get('Parabolic_SAR', 'NEUTRAL')}
-- EMA 50/200 Crossover: {indicators_1h.get('EMA_50_200_Crossover', 'NEUTRAL')}
-- Williams %R: {indicators_1h.get('Williams_%R', -50.0):.2f}
-- ADX: {indicators_1h.get('ADX', 25.0):.2f}
+            1-Hour Timeframe Indicators:
+            - RSI: {indicators_1h.get('RSI', 48.0):.2f}
+            - Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 0.025):.4f}
+            - MACD:
+            * MACD Line: {indicators_1h.get('MACD', {}).get('MACD', 0.0):.2f}
+            * Signal Line: {indicators_1h.get('MACD', {}).get('Signal', 0.0):.2f}
+            * Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 0.0):.2f}
+            - Parabolic SAR: {indicators_1h.get('Parabolic_SAR', 'NEUTRAL')}
+            - EMA 50/200 Crossover: {indicators_1h.get('EMA_50_200_Crossover', 'NEUTRAL')}
+            - Williams %R: {indicators_1h.get('Williams_%R', -50.0):.2f}
+            - ADX: {indicators_1h.get('ADX', 25.0):.2f}
 
-Order Book Analysis:
-- Bid/Ask Ratio: {order_book_metrics.get('bid_ask_ratio', 1.0):.4f}
-- Order Imbalance: {order_book_metrics.get('order_imbalance', 0.0):.4f}
-- Spread: {order_book_metrics.get('spread', 0.0):.2f}
-- Spread %: {order_book_metrics.get('spread_percentage', 0.0):.4f}%
-- VWAP:
-  * Bid VWAP: {order_book_metrics.get('bid_vwap', 0.0):.2f}
-  * Ask VWAP: {order_book_metrics.get('ask_vwap', 0.0):.2f}
-  * VWAP Midpoint: {order_book_metrics.get('vwap_midpoint', 0.0):.2f}
+            Order Book Analysis:
+            - Bid/Ask Ratio: {order_book_metrics.get('bid_ask_ratio', 1.0):.4f}
+            - Order Imbalance: {order_book_metrics.get('order_imbalance', 0.0):.4f}
+            - Spread: {order_book_metrics.get('spread', 0.0):.2f}
+            - Spread %: {order_book_metrics.get('spread_percentage', 0.0):.4f}%
+            - VWAP:
+            * Bid VWAP: {order_book_metrics.get('bid_vwap', 0.0):.2f}
+            * Ask VWAP: {order_book_metrics.get('ask_vwap', 0.0):.2f}
+            * VWAP Midpoint: {order_book_metrics.get('vwap_midpoint', 0.0):.2f}
 
-Futures Data:
-- Funding Rate: {data.get('futures_data', {}).get('funding_rate', 0.0):.6f}
-- Next Funding Time: {data.get('futures_data', {}).get('next_funding_time', 'Unknown')}
-- Open Interest: {data.get('futures_data', {}).get('open_interest', 0.0):.2f}
-- Open Interest Value: ${data.get('futures_data', {}).get('open_interest_value', 0.0):,.2f}
+            Futures Data:
+            - Funding Rate: {data.get('futures_data', {}).get('funding_rate', 0.0):.6f}
+            - Next Funding Time: {data.get('futures_data', {}).get('next_funding_time', 'Unknown')}
+            - Open Interest: {data.get('futures_data', {}).get('open_interest', 0.0):.2f}
+            - Open Interest Value: ${data.get('futures_data', {}).get('open_interest_value', 0.0):,.2f}
 
-Based on this data, please provide position management advice:
-1. Action (HOLD/CLOSE/PARTIAL_CLOSE)
-2. If PARTIAL_CLOSE, what percentage to close
-3. Update stop loss price (if needed)
-4. Update take profit price (if needed)
-5. Brief reasoning for the recommendation
+            Based on this data, please provide position management advice:
+            1. Action (HOLD/CLOSE/PARTIAL_CLOSE)
+            2. If PARTIAL_CLOSE, what percentage to close
+            3. Update stop loss price (if needed)
+            4. Update take profit price (if needed)
+            5. Brief reasoning for the recommendation
 
-Please format your response as a JSON object with the following structure:
-{
-    "action": "HOLD/CLOSE/PARTIAL_CLOSE",
-    "close_percentage": XX.XX,  # Only if action is PARTIAL_CLOSE
-    "stop_loss": XXX.XX,
-    "take_profit": XXX.XX,
-    "reasoning": "Your analysis here"
-}"""
+            Please format your response as a JSON object with the following structure:
+            {
+                "action": "HOLD/CLOSE/PARTIAL_CLOSE",
+                "close_percentage": XX.XX,  # Only if action is PARTIAL_CLOSE
+                "stop_loss": XXX.XX,
+                "take_profit": XXX.XX,
+                "reasoning": "Your analysis here"
+            }"""
             
             return prompt
             
@@ -353,24 +412,24 @@ Please format your response as a JSON object with the following structure:
         """
         return """You are a professional cryptocurrency futures trader with expertise in technical analysis, on-chain metrics, and market sentiment.
 
-Your goal is to analyze the provided market data and generate precise trading signals or position management advice.
+        Your goal is to analyze the provided market data and generate precise trading signals or position management advice.
 
-For trade signals:
-1. Carefully analyze all timeframes, indicators, market sentiment, and on-chain data
-2. Provide either BUY, SELL, or HOLD recommendations with confidence score
-3. For BUY/SELL signals, include logical stop loss and take profit levels
-4. Be cautious - only recommend trades with strong confirmation across multiple indicators
-5. Explain your reasoning clearly and concisely in JSON format
+        For trade signals:
+        1. Carefully analyze all timeframes, indicators, market sentiment, and on-chain data
+        2. Provide either BUY, SELL, or HOLD recommendations with confidence score
+        3. For BUY/SELL signals, include logical stop loss and take profit levels
+        4. Be cautious - only recommend trades with strong confirmation across multiple indicators
+        5. Explain your reasoning clearly and concisely in JSON format
 
-For position management:
-1. Carefully analyze existing positions in relation to current market conditions
-2. For each position, recommend whether to HOLD, CLOSE, PARTIAL_CLOSE, or MODIFY_SL_TP
-3. Include specific percentage for PARTIAL_CLOSE and specific levels for MODIFY_SL_TP
-4. Assess both technical and sentiment factors to justify your recommendation
-5. Return recommendations in the proper JSON format with confidence scores
+        For position management:
+        1. Carefully analyze existing positions in relation to current market conditions
+        2. For each position, recommend whether to HOLD, CLOSE, PARTIAL_CLOSE, or MODIFY_SL_TP
+        3. Include specific percentage for PARTIAL_CLOSE and specific levels for MODIFY_SL_TP
+        4. Assess both technical and sentiment factors to justify your recommendation
+        5. Return recommendations in the proper JSON format with confidence scores
 
-Only return valid JSON. Never include natural language explanations outside the JSON.
-"""
+        Only return valid JSON. Never include natural language explanations outside the JSON.
+        """
     
     def _validate_prediction(self, prediction: Dict[str, Any]) -> None:
         """
