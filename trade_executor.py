@@ -355,26 +355,28 @@ class TradeExecutor:
                 logger.warning(f"Position value {position_value:.2f} exceeds maximum safe value. Capping at {max_position_value:.2f}")
                 position_value = max_position_value
             
-            # NEW: Check available margin and adjust position size if needed
-            # We want to ensure we have enough margin for this trade
+            # IMPROVED MARGIN CHECK: Ensure we account for fees and potential price movement
+            # For futures trading, the initial margin required is approximately position_value / leverage
+            required_margin = position_value / self.leverage
+            
+            # Add margin for fees and potential price impact - use 15% buffer
+            required_margin_with_buffer = required_margin * 1.15  # 15% buffer
+            
+            # Ensure required margin doesn't exceed 90% of available balance to avoid rejections
             if available_balance > 0:
-                # For futures trading, the margin required is approximately position_value / leverage
-                required_margin = position_value / self.leverage
-                
-                # Add a 10% buffer to prevent just barely hitting the limit
-                required_margin_with_buffer = required_margin * 1.1
-                
-                # If required margin exceeds available balance, scale down the position
-                if required_margin_with_buffer > available_balance:
-                    margin_ratio = available_balance / required_margin_with_buffer
-                    old_position_value = position_value
-                    position_value = position_value * margin_ratio
+                max_safe_margin = available_balance * 0.9  # Leave 10% of available balance free
+                if required_margin_with_buffer > max_safe_margin:
+                    # Calculate the safe position value based on available margin
+                    safe_position_value = (max_safe_margin / 1.15) * self.leverage
                     
-                    logger.warning(f"Scaling down position due to margin constraints: Available=${available_balance:.2f}, Required=${required_margin_with_buffer:.2f}")
+                    old_position_value = position_value
+                    position_value = safe_position_value
+                    
+                    logger.warning(f"Scaling down position due to insufficient margin: Available=${available_balance:.2f}, Required=${required_margin_with_buffer:.2f}")
                     logger.warning(f"Position value reduced from {old_position_value:.2f} to {position_value:.2f}")
             
-            # Binance Futures requires minimum order value of 100 USDT
-            min_notional = 100.0
+            # Binance Futures requires minimum order value of 5 USDT for BTCUSDT
+            min_notional = 5.0  # Minimum for BTCUSDT is 5 USDT
             if position_value < min_notional:
                 logger.warning(f"Position value {position_value:.2f} USDT is less than minimum notional {min_notional} USDT")
                 logger.info(f"Increasing position value to meet minimum notional requirement")
@@ -562,69 +564,40 @@ class TradeExecutor:
         """
         try:
             # For futures, we can directly sell (short)
-            if self.leverage != float(self.client.get_leverage(symbol)):
-                # Get current market price using the new method
-                current_price = self.client.get_current_price(symbol)
+            # Get current market price
+            current_price = self.client.get_current_price(symbol)
+            
+            if current_price <= 0:
+                logger.error(f"Invalid current price: {current_price}")
+                return False
                 
-                if current_price <= 0:
-                    logger.error(f"Invalid current price: {current_price}")
-                    return False
-                    
-                # IMPORTANT: The quantity is already in BTC, not USDT
-                # Calculate USD value for logging purposes
+            # IMPORTANT: The quantity is already in BTC, not USDT
+            # Calculate USD value for logging purposes
+            usd_value = quantity * current_price
+            
+            # Log the actual values we're working with
+            logger.info(f"Using pre-calculated quantity: {quantity} {symbol[:-4]} at price {current_price} (value: {usd_value:.2f} USDT)")
+            
+            # Check minimum notional value (Binance Futures requires minimum order value of 5 USDT)
+            min_notional = 5.0  # Minimum for BTCUSDT is 5 USDT
+            
+            if usd_value < min_notional:
+                logger.warning(f"Order value {usd_value:.2f} USDT is below minimum {min_notional} USDT. Adjusting quantity.")
+                quantity = (min_notional * 1.01) / current_price  # Add 1% buffer
                 usd_value = quantity * current_price
-                
-                # Log the actual values we're working with
-                logger.info(f"Using pre-calculated quantity: {quantity} {symbol[:-4]} at price {current_price} (value: {usd_value:.2f} USDT)")
-                
-                # Check minimum notional value (Binance Futures requires minimum order value of 100 USDT)
-                min_notional = 100.0  # Minimum order value in USDT
-                
-                if usd_value < min_notional:
-                    logger.warning(f"Order value {usd_value:.2f} USDT is below minimum {min_notional} USDT. Adjusting quantity.")
-                    quantity = (min_notional * 1.01) / current_price  # Add 1% buffer
-                    usd_value = quantity * current_price
-                    logger.info(f"Adjusted quantity to {quantity} to meet minimum notional value")
-                
-                # Get symbol info for precision
-                symbol_info = self.client.get_exchange_info(symbol)
-                
-                if not symbol_info or not isinstance(symbol_info, dict) or not symbol_info.get("filters"):
-                    logger.error(f"Symbol info not found or invalid for {symbol}")
-                    # Try directly accessing symbol filters from the client
-                    try:
-                        # Use default precision as fallback
-                        logger.warning(f"Using default precision values for {symbol}")
-                        step_size = 0.001  # Standard BTC step size
-                        min_qty = 0.001    # Standard BTC minimum quantity
-                        
-                        # Round to the nearest step size using ceiling to ensure min notional
-                        quantity = math.ceil(quantity / step_size) * step_size
-                        
-                        # Ensure minimum quantity
-                        if quantity < min_qty:
-                            logger.warning(f"Calculated quantity {quantity} is below minimum {min_qty}. Using minimum.")
-                            quantity = min_qty
-                    except Exception as e:
-                        logger.error(f"Error using default precision: {str(e)}")
-                        return False
-                else:
-                    # Find the LOT_SIZE filter
-                    lot_size_filter = None
-                    for f in symbol_info.get("filters", []):
-                        if f.get("filterType") == "LOT_SIZE":
-                            lot_size_filter = f
-                            break
-                    
-                    if not lot_size_filter:
-                        logger.error(f"LOT_SIZE filter not found for {symbol}")
-                        # Use default values
-                        step_size = 0.001
-                        min_qty = 0.001
-                    else:
-                        # Get the step size and minimum quantity
-                        step_size = float(lot_size_filter.get("stepSize", 0.001))
-                        min_qty = float(lot_size_filter.get("minQty", 0.001))
+                logger.info(f"Adjusted quantity to {quantity} to meet minimum notional value")
+            
+            # Get symbol info for precision
+            symbol_info = self.client.get_exchange_info(symbol)
+            
+            if not symbol_info or not isinstance(symbol_info, dict) or not symbol_info.get("filters"):
+                logger.error(f"Symbol info not found or invalid for {symbol}")
+                # Try directly accessing symbol filters from the client
+                try:
+                    # Use default precision as fallback
+                    logger.warning(f"Using default precision values for {symbol}")
+                    step_size = 0.001  # Standard BTC step size
+                    min_qty = 0.001    # Standard BTC minimum quantity
                     
                     # Round to the nearest step size using ceiling to ensure min notional
                     quantity = math.ceil(quantity / step_size) * step_size
@@ -633,61 +606,85 @@ class TradeExecutor:
                     if quantity < min_qty:
                         logger.warning(f"Calculated quantity {quantity} is below minimum {min_qty}. Using minimum.")
                         quantity = min_qty
-                
-                # Final check: ensure minimum notional value is met
-                final_order_value = quantity * current_price
-                if final_order_value < min_notional:
-                    logger.warning(f"Final order value {final_order_value:.2f} USDT still below minimum {min_notional} USDT after adjustments.")
-                    # Force minimum notional value with safety buffer
-                    quantity = (min_notional / current_price) * 1.05  # Add 5% buffer to be safe
-                    # Round up to nearest step size
-                    quantity = math.ceil(quantity / step_size) * step_size
-                    logger.info(f"Forced quantity to {quantity} to ensure minimum notional value")
-                    
-                # Set leverage first
-                try:
-                    self.client.set_leverage(symbol, self.leverage)
-                    logger.info(f"Set leverage to {self.leverage}x for {symbol}")
                 except Exception as e:
-                    logger.warning(f"Could not set leverage: {str(e)}")
-                
-                # Execute the order
-                logger.info(f"Executing SELL (SHORT) order for {symbol}: {quantity} at ~{current_price} USDT (value: {quantity * current_price:.2f} USDT)")
-                
-                response = self.client.execute_order(
-                    symbol=symbol,
-                    side="SELL",
-                    quantity=quantity,
-                    order_type="MARKET",
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    raw_quantity=False  # Let binance_client handle formatting
-                )
-                
-                if response and response.get("orderId"):
-                    # Generate a unique position ID
-                    timestamp = int(time.time() * 1000)
-                    position_id = f"{symbol}_SELL_{timestamp}_{response.get('orderId')}"
-                    
-                    # Add to positions with the unique ID
-                    self.positions.append({
-                        "symbol": symbol,
-                        "side": "SELL",
-                        "entry_price": current_price,
-                        "quantity": quantity,
-                        "timestamp": timestamp,
-                        "position_id": position_id,
-                        "order_id": response.get("orderId")
-                    })
-                    
-                    logger.info(f"SELL (SHORT) order executed successfully: {symbol} {quantity} @ ~{current_price}, Position ID: {position_id}")
-                    return True
-                else:
-                    logger.error(f"SELL (SHORT) order failed: {response}")
+                    logger.error(f"Error using default precision: {str(e)}")
                     return False
             else:
-                # For futures, we need to check if we have the asset to sell
-                logger.warning("SELL signal received but futures market doesn't support shorting. Ignoring.")
+                # Find the LOT_SIZE filter
+                lot_size_filter = None
+                for f in symbol_info.get("filters", []):
+                    if f.get("filterType") == "LOT_SIZE":
+                        lot_size_filter = f
+                        break
+                
+                if not lot_size_filter:
+                    logger.error(f"LOT_SIZE filter not found for {symbol}")
+                    # Use default values
+                    step_size = 0.001
+                    min_qty = 0.001
+                else:
+                    # Get the step size and minimum quantity
+                    step_size = float(lot_size_filter.get("stepSize", 0.001))
+                    min_qty = float(lot_size_filter.get("minQty", 0.001))
+                
+                # Round to the nearest step size using ceiling to ensure min notional
+                quantity = math.ceil(quantity / step_size) * step_size
+                
+                # Ensure minimum quantity
+                if quantity < min_qty:
+                    logger.warning(f"Calculated quantity {quantity} is below minimum {min_qty}. Using minimum.")
+                    quantity = min_qty
+            
+            # Final check: ensure minimum notional value is met
+            final_order_value = quantity * current_price
+            if final_order_value < min_notional:
+                logger.warning(f"Final order value {final_order_value:.2f} USDT still below minimum {min_notional} USDT after adjustments.")
+                # Force minimum notional value with safety buffer
+                quantity = (min_notional / current_price) * 1.05  # Add 5% buffer to be safe
+                # Round up to nearest step size
+                quantity = math.ceil(quantity / step_size) * step_size
+                logger.info(f"Forced quantity to {quantity} to ensure minimum notional value")
+                
+            # Set leverage first
+            try:
+                self.client.set_leverage(symbol, self.leverage)
+                logger.info(f"Set leverage to {self.leverage}x for {symbol}")
+            except Exception as e:
+                logger.warning(f"Could not set leverage: {str(e)}")
+            
+            # Execute the order
+            logger.info(f"Executing SELL (SHORT) order for {symbol}: {quantity} at ~{current_price} USDT (value: {quantity * current_price:.2f} USDT)")
+            
+            response = self.client.execute_order(
+                symbol=symbol,
+                side="SELL",
+                quantity=quantity,
+                order_type="MARKET",
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                raw_quantity=False  # Let binance_client handle formatting
+            )
+            
+            if response and response.get("orderId"):
+                # Generate a unique position ID
+                timestamp = int(time.time() * 1000)
+                position_id = f"{symbol}_SELL_{timestamp}_{response.get('orderId')}"
+                
+                # Add to positions with the unique ID
+                self.positions.append({
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "entry_price": current_price,
+                    "quantity": quantity,
+                    "timestamp": timestamp,
+                    "position_id": position_id,
+                    "order_id": response.get("orderId")
+                })
+                
+                logger.info(f"SELL (SHORT) order executed successfully: {symbol} {quantity} @ ~{current_price}, Position ID: {position_id}")
+                return True
+            else:
+                logger.error(f"SELL (SHORT) order failed: {response}")
                 return False
                 
         except Exception as e:
