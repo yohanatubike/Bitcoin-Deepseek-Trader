@@ -237,7 +237,10 @@ class TradingBot:
         try:
             logger.info(f"🔄 Starting trading cycle for {self.symbol}")
             
-            # 1. Fetch account metrics
+            # 1. Monitor positions first
+            self.trade_executor.monitor_positions()
+            
+            # 2. Fetch account metrics
             try:
                 account_metrics = self.binance_client.get_account_metrics()
                 balance = account_metrics.get("balance_usd", 0)
@@ -257,7 +260,7 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"❌ Error fetching account metrics: {str(e)}")
             
-            # 2. Fetch market data
+            # 3. Fetch market data (only once)
             market_data = self.binance_client.fetch_market_data(self.symbol)
             if not market_data:
                 logger.error("❌ Failed to fetch market data")
@@ -265,33 +268,18 @@ class TradingBot:
                 
             logger.info(f"📊 Fetched market data for {self.symbol}")
             
-            # 3. Enrich data with indicators
+            # 4. Enrich data with indicators
             enriched_data = self.data_enricher.enrich_data(market_data)
             logger.info("🔍 Enriched market data with technical indicators")
             
-            # 4. Get prediction from DeepSeek
-            # Check for existing positions first to determine request type
+            # 5. Check for existing positions
             existing_positions = self.trade_executor.get_active_positions()
             existing_count = len(existing_positions)
             
-            # If we've reached max positions, switch to position management mode
+            # 6. Get prediction from DeepSeek based on position state
             if existing_count >= self.max_positions:
                 logger.info(f"Maximum positions reached ({existing_count}/{self.max_positions}). Switching to position management mode.")
-                # Calculate PnL for active positions
-                positions_pnl = self.trade_executor.calculate_positions_pnl()
-                
-                # Add position data and PnL to each position for better advice
-                for position in existing_positions:
-                    symbol = position.get("symbol")
-                    position_id = position.get("position_id")
-                    # Find PnL for this position
-                    for p in positions_pnl.get("positions", []):
-                        if p.get("position_id") == position_id:
-                            position["pnl_usd"] = p.get("pnl_usd", 0)
-                            position["pnl_percent"] = p.get("pnl_percent", 0)
-                            break
-                
-                # Add active positions to the market data
+                # Add position data to enriched data
                 enriched_data["active_positions"] = existing_positions
                 enriched_data["request_type"] = "position_management"
                 
@@ -304,7 +292,6 @@ class TradingBot:
             
             if not prediction:
                 logger.error("❌ No prediction received")
-                time.sleep(self.cycle_interval)
                 return
             
             # Check if prediction has nested structure with 'prediction' key
@@ -324,7 +311,6 @@ class TradingBot:
                 volatility = prediction.get("volatility", 0.01)
             else:
                 logger.error("❌ Invalid prediction format received")
-                time.sleep(self.cycle_interval)
                 return
             
             # Log all prediction details including volatility
@@ -337,7 +323,7 @@ class TradingBot:
             if take_profit:
                 logger.info(f"💰 Take Profit: {take_profit}")
             
-            # 5. Execute trade if confidence is high enough
+            # 7. Execute trade if confidence is high enough
             if confidence >= self.confidence_threshold:
                 logger.info(f"✅ Confidence {confidence:.2f} meets threshold {self.confidence_threshold}")
                 
@@ -400,26 +386,30 @@ class TradingBot:
                     if existing_count >= self.max_positions and action != "HOLD":
                         logger.warning(f"⚠️ Maximum positions reached ({existing_count}/{self.max_positions})")
                     else:
-                        # Execute the trade
-                        success = self.trade_executor.execute_trade(
-                            symbol=self.symbol,
-                            action=action,
-                            confidence=confidence,
-                            confidence_threshold=self.confidence_threshold,
-                            stop_loss=stop_loss,
-                            take_profit=take_profit,
-                            volatility=volatility
-                        )
-                        
-                        if success:
-                            logger.info(f"✅ Successfully executed {action} trade for {self.symbol}")
-                            self.session_trades_count += 1
+                        # Skip trade execution for HOLD actions
+                        if action == "HOLD":
+                            logger.info("⏸️ No trade execution needed for HOLD action")
                         else:
-                            logger.warning(f"⚠️ Failed to execute {action} trade for {self.symbol}")
+                            # Execute the trade
+                            success = self.trade_executor.execute_trade(
+                                symbol=self.symbol,
+                                action=action,
+                                confidence=confidence,
+                                confidence_threshold=self.confidence_threshold,
+                                stop_loss=stop_loss,
+                                take_profit=take_profit,
+                                volatility=volatility
+                            )
+                            
+                            if success:
+                                logger.info(f"✅ Successfully executed {action} trade for {self.symbol}")
+                                self.session_trades_count += 1
+                            else:
+                                logger.warning(f"⚠️ Failed to execute {action} trade for {self.symbol}")
             else:
                 logger.info(f"⏸️ Confidence {confidence:.2f} below threshold {self.confidence_threshold}, no trade executed")
                 
-            # 6. Log active positions
+            # 8. Log active positions
             active_positions = self.trade_executor.get_active_positions()
             if active_positions:
                 logger.info(f"📋 Active positions ({len(active_positions)}):")
@@ -437,19 +427,37 @@ class TradingBot:
             
         except Exception as e:
             logger.error(f"❌ Error in trading cycle: {str(e)}")
-            traceback.print_exc()
+            logger.error(traceback.format_exc())
     
     def start(self):
         """Start the trading bot"""
         logger.info("Starting Trading Bot")
+        self.running = True
         
         try:
-            while True:
-                self.run_cycle()
-                logger.info(f"Sleeping for {self.cycle_interval} seconds")
-                time.sleep(self.cycle_interval)
+            while self.running:
+                cycle_start_time = time.time()
+                
+                try:
+                    # Run the trading cycle
+                    self.run_cycle()
+                    
+                    # Calculate how long to sleep
+                    cycle_duration = time.time() - cycle_start_time
+                    sleep_time = max(0, self.cycle_interval - cycle_duration)
+                    
+                    if sleep_time > 0:
+                        logger.info(f"Sleeping for {sleep_time:.1f} seconds until next cycle")
+                        time.sleep(sleep_time)
+                    
+                except Exception as e:
+                    logger.error(f"Error in main loop: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    time.sleep(5)  # Wait before retrying
+                
         except KeyboardInterrupt:
-            logger.info("Trading Bot stopped by user")
+            logger.info("Shutting down gracefully...")
+            self.running = False
             
             # Log final session statistics
             session_duration = int(time.time()) - self.session_start_time
@@ -473,32 +481,8 @@ class TradingBot:
                 response = input("Do you want to close all active positions? (y/n): ").strip().lower()
                 if response == 'y' or response == 'yes':
                     logger.info("Closing all active positions...")
-                    
-                    # Calculate final P/L for all positions before closing
-                    positions_pnl = self.trade_executor.calculate_positions_pnl()
-                    for position in positions_pnl["positions"]:
-                        pnl = position["pnl_usd"]
-                        self.session_total_pnl += pnl
-                        self.session_trades_count += 1
-                        if pnl >= 0:
-                            self.session_winning_trades += 1
-                        else:
-                            self.session_losing_trades += 1
-                    
                     self.trade_executor.close_all_positions()
                     logger.info("All positions closed.")
-                    
-                    # Log updated final statistics
-                    logger.info("\nUpdated Final Session Summary:")
-                    logger.info(f"Total P/L: {'+'if self.session_total_pnl >= 0 else ''}" +
-                               f"${self.session_total_pnl:,.2f}")
-                    if self.session_trades_count > 0:
-                        win_rate = (self.session_winning_trades / self.session_trades_count * 100)
-                        avg_pnl_per_trade = self.session_total_pnl / self.session_trades_count
-                        logger.info(f"Total Trades: {self.session_trades_count}")
-                        logger.info(f"Win Rate: {win_rate:.1f}%")
-                        logger.info(f"Average P/L per Trade: {'+'if avg_pnl_per_trade >= 0 else ''}" +
-                                   f"${avg_pnl_per_trade:,.2f}")
                 else:
                     logger.info("Keeping all positions open.")
                     active_positions = self.trade_executor.get_active_positions()
@@ -509,6 +493,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}")
             logger.error(traceback.format_exc())
+            self.running = False
             raise
 
 if __name__ == "__main__":

@@ -1060,4 +1060,143 @@ class BinanceClient:
                 
         except Exception as e:
             logger.error(f"Error getting current price for {symbol}: {str(e)}")
-            return 0.0 
+            return 0.0
+
+    def create_stop_loss_order(self, symbol: str, side: str, stop_price: float, quantity: float, close_position: bool = True) -> dict:
+        """
+        Create a stop loss order
+        
+        Args:
+            symbol: Trading pair symbol
+            side: Order side (BUY/SELL)
+            stop_price: Stop price to trigger the order
+            quantity: Order quantity
+            close_position: Whether to close the entire position
+        
+        Returns:
+            dict: Order response from Binance
+        """
+        try:
+            # Format the quantity according to symbol info
+            formatted_quantity = self.format_quantity(symbol, quantity)
+            formatted_price = self.format_price(symbol, stop_price)
+            
+            params = {
+                "symbol": symbol,
+                "side": side,
+                "type": "STOP_MARKET",
+                "quantity": formatted_quantity,
+                "stopPrice": formatted_price,
+                "closePosition": str(close_position).lower(),
+                "workingType": "MARK_PRICE",  # Use mark price to avoid premature triggers
+                "timeInForce": "GTC"
+            }
+            
+            response = self.client.futures_create_order(**params)
+            logger.info(f"Created stop loss order: {side} {formatted_quantity} {symbol} @ {formatted_price}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error creating stop loss order: {str(e)}")
+            return None
+
+    def create_take_profit_order(self, symbol: str, side: str, stop_price: float, quantity: float, close_position: bool = True) -> dict:
+        """
+        Create a take profit order
+        
+        Args:
+            symbol: Trading pair symbol
+            side: Order side (BUY/SELL)
+            stop_price: Stop price to trigger the order
+            quantity: Order quantity
+            close_position: Whether to close the entire position
+        
+        Returns:
+            dict: Order response from Binance
+        """
+        try:
+            # Format the quantity according to symbol info
+            formatted_quantity = self.format_quantity(symbol, quantity)
+            formatted_price = self.format_price(symbol, stop_price)
+            
+            params = {
+                "symbol": symbol,
+                "side": side,
+                "type": "TAKE_PROFIT_MARKET",
+                "quantity": formatted_quantity,
+                "stopPrice": formatted_price,
+                "closePosition": str(close_position).lower(),
+                "workingType": "MARK_PRICE",  # Use mark price to avoid premature triggers
+                "timeInForce": "GTC"
+            }
+            
+            response = self.client.futures_create_order(**params)
+            logger.info(f"Created take profit order: {side} {formatted_quantity} {symbol} @ {formatted_price}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error creating take profit order: {str(e)}")
+            return None
+
+    def cancel_order(self, symbol: str, order_id: int) -> dict:
+        """
+        Cancel an order by its ID
+        
+        Args:
+            symbol: Trading pair symbol
+            order_id: Order ID to cancel
+        
+        Returns:
+            dict: Cancellation response from Binance
+        """
+        try:
+            response = self.client.futures_cancel_order(
+                symbol=symbol,
+                orderId=order_id
+            )
+            logger.info(f"Cancelled order {order_id} for {symbol}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error cancelling order: {str(e)}")
+            return None
+
+    def get_open_orders(self, symbol: str) -> List[dict]:
+        """
+        Get all open orders for a symbol
+        
+        Args:
+            symbol: Trading pair symbol
+        
+        Returns:
+            List[dict]: List of open orders
+        """
+        try:
+            orders = self.client.futures_get_open_orders(symbol=symbol)
+            return orders
+            
+        except Exception as e:
+            logger.error(f"Error getting open orders: {str(e)}")
+            return []
+
+    def get_recent_trades(self, symbol: str, limit: int = 100) -> List[dict]:
+        """
+        Get recent trades for a symbol
+        
+        Args:
+            symbol: Trading pair symbol
+            limit: Number of trades to fetch (max 1000)
+        
+        Returns:
+            List[dict]: List of recent trades
+        """
+        try:
+            trades = self.client.futures_account_trades(
+                symbol=symbol,
+                limit=limit
+            )
+            return trades
+            
+        except Exception as e:
+            logger.error(f"Error getting recent trades: {str(e)}")
+            return [] 

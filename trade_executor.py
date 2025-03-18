@@ -49,6 +49,10 @@ class TradeExecutor:
         try:
             # Get positions from the API
             positions = self.client.get_positions(self.symbol)
+            
+            # Clear existing positions list
+            self.positions = []
+            
             for position in positions:
                 # Only add positions with non-zero amount
                 position_amt = float(position.get("positionAmt", 0))
@@ -65,6 +69,17 @@ class TradeExecutor:
                     if not position_id:
                         position_id = f"{symbol}_{side}_{int(time.time() * 1000)}"
                     
+                    # Get associated orders (SL/TP)
+                    orders = self.client.get_open_orders(symbol)
+                    sl_order = None
+                    tp_order = None
+                    
+                    for order in orders:
+                        if order.get("type") == "STOP_MARKET" and order.get("closePosition", False):
+                            sl_order = order
+                        elif order.get("type") == "TAKE_PROFIT_MARKET" and order.get("closePosition", False):
+                            tp_order = order
+                    
                     self.positions.append({
                         "symbol": symbol,
                         "side": side,
@@ -73,10 +88,17 @@ class TradeExecutor:
                         "timestamp": int(time.time() * 1000),
                         "position_id": position_id,
                         "leverage": leverage,
-                        "margin_type": margin_type
+                        "margin_type": margin_type,
+                        "sl_order_id": sl_order.get("orderId") if sl_order else None,
+                        "tp_order_id": tp_order.get("orderId") if tp_order else None,
+                        "stop_loss": float(sl_order.get("stopPrice", 0)) if sl_order else None,
+                        "take_profit": float(tp_order.get("stopPrice", 0)) if tp_order else None
                     })
                     logger.info(f"📊 Loaded existing futures position: {symbol} {side} {amount} @ {entry_price} with {leverage}x leverage")
-        
+            
+            # Log loaded positions
+            logger.info(f"Loaded {len(self.positions)} active positions")
+            
         except Exception as e:
             logger.error(f"❌ Error loading existing positions: {str(e)}")
             traceback.print_exc()
@@ -99,13 +121,14 @@ class TradeExecutor:
         Returns:
             Whether the trade was executed
         """
-        # DEBUGGING: Log that execute_trade was called
-        print(f"DEBUG: Execute trade called: action={action}, confidence={confidence:.2f}, threshold={confidence_threshold:.2f}, volatility={volatility}")
-        logger.info(f"DEBUG: Execute trade called: action={action}, confidence={confidence:.2f}, threshold={confidence_threshold:.2f}, volatility={volatility}")
-        
-        # Skip if action is HOLD or confidence is below threshold
-        if action == "HOLD" or confidence < confidence_threshold:
-            logger.info(f"No trade: action={action}, confidence={confidence:.2f} < threshold={confidence_threshold:.2f}")
+        # Skip if action is HOLD
+        if action == "HOLD":
+            logger.info("No trade execution needed for HOLD action")
+            return True
+            
+        # Skip if confidence is below threshold
+        if confidence < confidence_threshold:
+            logger.info(f"No trade: confidence={confidence:.2f} < threshold={confidence_threshold:.2f}")
             return False
             
         # Check if we already have too many positions
@@ -501,25 +524,12 @@ class TradeExecutor:
                 logger.info(f"Forced quantity to {quantity} to ensure minimum notional value")
                 
             # Execute the order
-            logger.info(f"Executing BUY order for {symbol}: {quantity} at ~{current_price} USDT (value: {quantity * current_price:.2f} USDT)")
-            
-            # For futures, we need to set the leverage first
-            if self.leverage != float(self.client.get_leverage(symbol)):
-                try:
-                    self.client.set_leverage(symbol, self.leverage)
-                    logger.info(f"Set leverage to {self.leverage}x for {symbol}")
-                except Exception as e:
-                    logger.warning(f"Could not set leverage: {str(e)}")
-            
-            # Execute the order
             response = self.client.execute_order(
                 symbol=symbol,
                 side="BUY",
                 quantity=quantity,
                 order_type="MARKET",
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                raw_quantity=False  # Let binance_client handle formatting
+                raw_quantity=False
             )
             
             if response and response.get("orderId"):
@@ -527,7 +537,35 @@ class TradeExecutor:
                 timestamp = int(time.time() * 1000)
                 position_id = f"{symbol}_BUY_{timestamp}_{response.get('orderId')}"
                 
-                # Add to positions with the unique ID
+                # Create stop loss order if provided
+                sl_order_id = None
+                if stop_loss:
+                    sl_response = self.client.create_stop_loss_order(
+                        symbol=symbol,
+                        side="SELL",
+                        stop_price=stop_loss,
+                        quantity=quantity,
+                        close_position=True
+                    )
+                    if sl_response and sl_response.get("orderId"):
+                        sl_order_id = sl_response.get("orderId")
+                        logger.info(f"Created stop loss order at {stop_loss}")
+                
+                # Create take profit order if provided
+                tp_order_id = None
+                if take_profit:
+                    tp_response = self.client.create_take_profit_order(
+                        symbol=symbol,
+                        side="SELL",
+                        stop_price=take_profit,
+                        quantity=quantity,
+                        close_position=True
+                    )
+                    if tp_response and tp_response.get("orderId"):
+                        tp_order_id = tp_response.get("orderId")
+                        logger.info(f"Created take profit order at {take_profit}")
+                
+                # Add to positions with the unique ID and order IDs
                 self.positions.append({
                     "symbol": symbol,
                     "side": "BUY",
@@ -535,7 +573,11 @@ class TradeExecutor:
                     "quantity": quantity,
                     "timestamp": timestamp,
                     "position_id": position_id,
-                    "order_id": response.get("orderId")
+                    "order_id": response.get("orderId"),
+                    "sl_order_id": sl_order_id,
+                    "tp_order_id": tp_order_id,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit
                 })
                 
                 logger.info(f"BUY order executed successfully: {symbol} {quantity} @ ~{current_price}, Position ID: {position_id}")
@@ -638,24 +680,12 @@ class TradeExecutor:
                 logger.warning(f"Could not set leverage: {str(e)}")
             
             # Execute the order
-            logger.info(f"Executing SELL (SHORT) order for {symbol}: {quantity} at ~{current_price} USDT (value: {quantity * current_price:.2f} USDT)")
-            
-            # Set margin type to ISOLATED if not already set
-            try:
-                self.client.set_margin_type(symbol, "ISOLATED")
-                logger.info("Set margin type to ISOLATED")
-            except Exception as e:
-                if "No need to change margin type" not in str(e):
-                    logger.warning(f"Could not set margin type: {str(e)}")
-            
             response = self.client.execute_order(
                 symbol=symbol,
                 side="SELL",
                 quantity=quantity,
                 order_type="MARKET",
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                raw_quantity=False  # Let binance_client handle formatting
+                raw_quantity=False
             )
             
             if response and response.get("orderId"):
@@ -663,7 +693,35 @@ class TradeExecutor:
                 timestamp = int(time.time() * 1000)
                 position_id = f"{symbol}_SELL_{timestamp}_{response.get('orderId')}"
                 
-                # Add to positions with the unique ID
+                # Create stop loss order if provided
+                sl_order_id = None
+                if stop_loss:
+                    sl_response = self.client.create_stop_loss_order(
+                        symbol=symbol,
+                        side="BUY",
+                        stop_price=stop_loss,
+                        quantity=quantity,
+                        close_position=True
+                    )
+                    if sl_response and sl_response.get("orderId"):
+                        sl_order_id = sl_response.get("orderId")
+                        logger.info(f"Created stop loss order at {stop_loss}")
+                
+                # Create take profit order if provided
+                tp_order_id = None
+                if take_profit:
+                    tp_response = self.client.create_take_profit_order(
+                        symbol=symbol,
+                        side="BUY",
+                        stop_price=take_profit,
+                        quantity=quantity,
+                        close_position=True
+                    )
+                    if tp_response and tp_response.get("orderId"):
+                        tp_order_id = tp_response.get("orderId")
+                        logger.info(f"Created take profit order at {take_profit}")
+                
+                # Add to positions with the unique ID and order IDs
                 self.positions.append({
                     "symbol": symbol,
                     "side": "SELL",
@@ -671,13 +729,17 @@ class TradeExecutor:
                     "quantity": quantity,
                     "timestamp": timestamp,
                     "position_id": position_id,
-                    "order_id": response.get("orderId")
+                    "order_id": response.get("orderId"),
+                    "sl_order_id": sl_order_id,
+                    "tp_order_id": tp_order_id,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit
                 })
                 
-                logger.info(f"SELL (SHORT) order executed successfully: {symbol} {quantity} @ ~{current_price}, Position ID: {position_id}")
+                logger.info(f"SELL order executed successfully: {symbol} {quantity} @ ~{current_price}, Position ID: {position_id}")
                 return True
             else:
-                logger.error(f"SELL (SHORT) order failed: {response}")
+                logger.error(f"SELL order failed: {response}")
                 return False
                 
         except Exception as e:
@@ -860,17 +922,34 @@ class TradeExecutor:
         """
         logger.info(f"Closing position with ID: {position_id}")
         
-        # Find the position by ID
-        position = next((p for p in self.positions if p.get("position_id") == position_id), None)
-        
-        if not position:
-            logger.warning(f"Position with ID {position_id} not found")
-            return False
-            
         try:
+            # Find the position by ID
+            position = next((p for p in self.positions if p.get("position_id") == position_id), None)
+            
+            if not position:
+                logger.warning(f"Position with ID {position_id} not found")
+                return False
+            
             symbol = position["symbol"]
             side = position["side"]
             quantity = position["quantity"]
+            sl_order_id = position.get("sl_order_id")
+            tp_order_id = position.get("tp_order_id")
+            
+            # Cancel any existing SL/TP orders first
+            if sl_order_id:
+                try:
+                    self.client.cancel_order(symbol, order_id=sl_order_id)
+                    logger.info(f"Cancelled stop loss order {sl_order_id}")
+                except Exception as e:
+                    logger.warning(f"Could not cancel stop loss order: {str(e)}")
+            
+            if tp_order_id:
+                try:
+                    self.client.cancel_order(symbol, order_id=tp_order_id)
+                    logger.info(f"Cancelled take profit order {tp_order_id}")
+                except Exception as e:
+                    logger.warning(f"Could not cancel take profit order: {str(e)}")
             
             # Determine the closing side
             close_side = "SELL" if side == "BUY" else "BUY"
@@ -1203,4 +1282,54 @@ class TradeExecutor:
             
         except Exception as e:
             logger.error(f"Error calculating positions PnL: {str(e)}")
-            return result 
+            return result
+
+    def monitor_positions(self):
+        """Monitor active positions and detect closures"""
+        try:
+            # Get current positions from exchange
+            current_positions = {
+                p["symbol"]: float(p["positionAmt"])
+                for p in self.client.get_positions(self.symbol)
+                if float(p["positionAmt"]) != 0
+            }
+            
+            # Check each tracked position
+            for position in self.positions[:]:  # Create copy to allow modification during iteration
+                symbol = position["symbol"]
+                position_id = position["position_id"]
+                
+                # Position no longer exists on exchange
+                if symbol not in current_positions:
+                    # Get recent trades to determine if closed by TP/SL
+                    trades = self.client.get_recent_trades(symbol)
+                    last_trade = next((t for t in trades if t["orderId"] in 
+                                     [position.get("sl_order_id"), position.get("tp_order_id")]), None)
+                    
+                    if last_trade:
+                        # Position was closed by TP/SL
+                        close_type = "stop loss" if last_trade["orderId"] == position.get("sl_order_id") else "take profit"
+                        logger.info(f"Position {position_id} was closed by {close_type}")
+                        
+                        # Cancel the other order
+                        other_order_id = position.get("tp_order_id") if close_type == "stop loss" else position.get("sl_order_id")
+                        if other_order_id:
+                            try:
+                                self.client.cancel_order(symbol, other_order_id)
+                                logger.info(f"Cancelled remaining {close_type} order {other_order_id}")
+                            except Exception as e:
+                                logger.warning(f"Could not cancel remaining order: {str(e)}")
+                    else:
+                        logger.info(f"Position {position_id} was closed (manual or other reason)")
+                    
+                    # Remove from tracked positions
+                    self.positions.remove(position)
+                    
+                # Position exists but amount changed
+                elif abs(current_positions[symbol]) != abs(position["quantity"]):
+                    logger.info(f"Position {position_id} quantity changed from {position['quantity']} to {abs(current_positions[symbol])}")
+                    position["quantity"] = abs(current_positions[symbol])
+            
+        except Exception as e:
+            logger.error(f"Error monitoring positions: {str(e)}")
+            logger.error(traceback.format_exc()) 

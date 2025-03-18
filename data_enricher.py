@@ -17,6 +17,9 @@ import traceback
 # Import SantimentAPI
 from santiment_api import SantimentAPI
 
+# Import ta (Technical Analysis Library in Python)
+import ta
+
 logger = logging.getLogger(__name__)
 
 class DataEnricher:
@@ -33,42 +36,90 @@ class DataEnricher:
     
     def enrich_data(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Enrich market data with technical indicators, sentiment, and macro factors
+        Enrich market data with technical indicators and analysis
         
         Args:
             market_data: Raw market data from Binance
             
         Returns:
-            Enriched market data
+            Dict containing enriched market data with indicators
         """
-        # Create a copy to avoid modifying the original
-        enriched_data = copy.deepcopy(market_data)
-        
-        # Add technical indicators
-        self._add_technical_indicators(enriched_data)
-        
-        # Enhance order book data
-        self._enhance_order_book_data(enriched_data)
-        
-        # Add correlation data
-        self._add_correlation_analysis(enriched_data)
-        
-        # Add sentiment data
-        self._add_sentiment_data(enriched_data)
-        
-        # Add macro factors
-        self._add_macro_factors(enriched_data)
-        
-        # Add on-chain metrics
-        self._add_onchain_metrics(enriched_data)
-        
-        # Add risk metrics
-        self._add_risk_metrics(enriched_data)
-        
-        # Add futures-specific metrics
-        self._add_futures_metrics(enriched_data)
-        
-        return enriched_data
+        try:
+            logger.info("✅ Starting data enrichment")
+            
+            # Get klines data for different timeframes
+            klines_data = market_data.get("klines", {})
+            
+            # Log available klines data
+            timeframes = {tf: len(data) for tf, data in klines_data.items()}
+            logger.info(f"✅ Klines data available: {', '.join(f'{tf}={count}' for tf, count in timeframes.items())}")
+            
+            # Convert klines to DataFrames and calculate indicators for each timeframe
+            enriched_data = market_data.copy()
+            indicators = {}
+            
+            for timeframe, data in klines_data.items():
+                if not data:
+                    continue
+                    
+                # Convert to DataFrame
+                df = pd.DataFrame(data, columns=[
+                    'open_time', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_asset_volume', 'number_of_trades',
+                    'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+                ])
+                
+                # Convert string values to float
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                
+                # Set timestamp as index
+                df.set_index('open_time', inplace=True)
+                
+                # Calculate indicators for this timeframe
+                timeframe_indicators = self._calculate_indicators(df, timeframe)
+                
+                if timeframe == '5m':
+                    indicators['5m'] = timeframe_indicators
+                    logger.info(f"✅ ✅ 5m indicators: {json.dumps(timeframe_indicators)}")
+                elif timeframe == '1h':
+                    indicators['1h'] = timeframe_indicators
+                    logger.info(f"✅ ✅ 1h indicators: {json.dumps(timeframe_indicators)}")
+            
+            # Add indicators to enriched data
+            enriched_data['indicators'] = indicators
+            
+            # Add order book analysis if available
+            if 'order_book' in market_data:
+                enriched_data['order_book'] = self._enhance_order_book_data(market_data['order_book'])
+                logger.info("✅ ✅ Enhanced order book data with advanced metrics")
+            
+            # Add correlation analysis
+            logger.info("✅ 📊 Adding correlation analysis")
+            correlation_data = self._calculate_correlations(klines_data)
+            enriched_data['correlations'] = correlation_data
+            logger.info("✅ ✅ Correlation analysis added")
+            
+            # Add sentiment data if available
+            if self.santiment_api:
+                try:
+                    sentiment_data = self.santiment_api.get_sentiment_metrics(market_data['symbol'])
+                    enriched_data['sentiment'] = sentiment_data
+                    logger.info("✅ ✅ Added sentiment data from Santiment API")
+                except Exception as e:
+                    logger.error(f"Error getting sentiment data: {str(e)}")
+                    enriched_data['sentiment'] = self._get_default_sentiment()
+            else:
+                logger.info("Santiment API not available. Using default sentiment values.")
+                enriched_data['sentiment'] = self._get_default_sentiment()
+            
+            logger.info("✅ ✅ Technical indicators calculated successfully")
+            return enriched_data
+            
+        except Exception as e:
+            logger.error(f"Error enriching data: {str(e)}")
+            logger.error(traceback.format_exc())
+            return market_data
     
     def _add_technical_indicators(self, data: Dict[str, Any]) -> None:
         """
@@ -2354,150 +2405,63 @@ class DataEnricher:
         except Exception as e:
             logger.error(f"Error adding correlation analysis: {e}")
 
-    def _enhance_order_book_data(self, data: Dict[str, Any]) -> None:
+    def _enhance_order_book_data(self, order_book: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Enhance order book data with additional metrics
+        Enhance order book data with advanced metrics
         
         Args:
-            data: Market data dictionary
+            order_book: Raw order book data
+            
+        Returns:
+            Dict containing enhanced order book metrics
         """
-        if "order_book" not in data:
-            logger.warning("No order book data found to enhance")
-            return
-            
         try:
-            order_book = data["order_book"]
+            enhanced = order_book.copy()
             
-            # Skip if no bids/asks
-            if "bids" not in order_book or "asks" not in order_book:
-                logger.warning("Incomplete order book data (missing bids or asks)")
-                return
-                
-            # Get bids and asks
-            bids = order_book["bids"]
-            asks = order_book["asks"]
+            # Extract bids and asks
+            bids = order_book.get('bids', [])
+            asks = order_book.get('asks', [])
             
-            # Skip if empty
             if not bids or not asks:
-                logger.warning("Empty bids or asks in order book")
-                return
-                
-            # Validate data format
-            valid_bids = []
-            valid_asks = []
+                return enhanced
             
-            # Process bids
-            for bid in bids:
-                try:
-                    if isinstance(bid, list) and len(bid) >= 2:
-                        price = float(bid[0])
-                        amount = float(bid[1])
-                        valid_bids.append([price, amount])
-                    elif isinstance(bid, dict) and 'price' in bid and 'quantity' in bid:
-                        price = float(bid['price'])
-                        amount = float(bid['quantity'])
-                        valid_bids.append([price, amount])
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Invalid bid format: {bid}, error: {e}")
-                    continue
+            # Convert to numpy arrays for faster computation
+            bids_array = np.array(bids, dtype=float)
+            asks_array = np.array(asks, dtype=float)
             
-            # Process asks
-            for ask in asks:
-                try:
-                    if isinstance(ask, list) and len(ask) >= 2:
-                        price = float(ask[0])
-                        amount = float(ask[1])
-                        valid_asks.append([price, amount])
-                    elif isinstance(ask, dict) and 'price' in ask and 'quantity' in ask:
-                        price = float(ask['price'])
-                        amount = float(ask['quantity'])
-                        valid_asks.append([price, amount])
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Invalid ask format: {ask}, error: {e}")
-                    continue
+            # Calculate basic metrics
+            bid_volume = np.sum(bids_array[:, 1])
+            ask_volume = np.sum(asks_array[:, 1])
+            total_volume = bid_volume + ask_volume
             
-            # Skip if no valid data
-            if not valid_bids or not valid_asks:
-                logger.warning("No valid bids or asks after validation")
-                return
-                
-            # Calculate depth imbalance (ratio of bid to ask volume within a specific range)
-            # This helps detect buying/selling pressure at different price levels
+            # Calculate advanced metrics
+            enhanced['metrics'] = {
+                'bid_volume': float(bid_volume),
+                'ask_volume': float(ask_volume),
+                'total_volume': float(total_volume),
+                'bid_ask_ratio': float(bid_volume / ask_volume) if ask_volume > 0 else float('inf'),
+                'order_imbalance': float((bid_volume - ask_volume) / total_volume) if total_volume > 0 else 0.0,
+                'spread': float(asks_array[0, 0] - bids_array[0, 0]) if len(asks_array) > 0 and len(bids_array) > 0 else 0.0,
+                'spread_percentage': float((asks_array[0, 0] - bids_array[0, 0]) / asks_array[0, 0] * 100) if len(asks_array) > 0 and len(bids_array) > 0 else 0.0,
+                'mid_price': float((asks_array[0, 0] + bids_array[0, 0]) / 2) if len(asks_array) > 0 and len(bids_array) > 0 else 0.0
+            }
             
-            # For top 10 levels (or all if less than 10)
-            top_n = min(10, len(valid_bids), len(valid_asks))
-            top_bid_volume = sum(bid[1] for bid in valid_bids[:top_n])
-            top_ask_volume = sum(ask[1] for ask in valid_asks[:top_n])
+            # Calculate volume-weighted metrics
+            bid_vwap = np.sum(bids_array[:, 0] * bids_array[:, 1]) / bid_volume if bid_volume > 0 else 0
+            ask_vwap = np.sum(asks_array[:, 0] * asks_array[:, 1]) / ask_volume if ask_volume > 0 else 0
             
-            # Calculate imbalance (normalized between -1 and 1)
-            # Positive means more buy pressure, negative means more sell pressure
-            if top_bid_volume + top_ask_volume > 0:
-                depth_imbalance = (top_bid_volume - top_ask_volume) / (top_bid_volume + top_ask_volume)
-            else:
-                depth_imbalance = 0
-                
-            order_book["depth_imbalance"] = round(depth_imbalance, 4)
+            enhanced['metrics'].update({
+                'bid_vwap': float(bid_vwap),
+                'ask_vwap': float(ask_vwap),
+                'vwap_midpoint': float((bid_vwap + ask_vwap) / 2) if bid_vwap > 0 and ask_vwap > 0 else 0.0
+            })
             
-            # Calculate general bid-ask ratio
-            if top_ask_volume > 0:
-                bid_ask_ratio = top_bid_volume / top_ask_volume
-            else:
-                bid_ask_ratio = 1.0  # Default neutral
-                
-            order_book["bid_ask_ratio"] = round(bid_ask_ratio, 4)
-            
-            # Detect large orders (whales)
-            # First, calculate the average order size
-            all_orders = [bid[1] for bid in valid_bids] + [ask[1] for ask in valid_asks]
-            if all_orders:
-                avg_order_size = sum(all_orders) / len(all_orders)
-                
-                # Define large orders (>5x average)
-                large_order_threshold = avg_order_size * 5
-                
-                # Find large bids and asks
-                large_bids = [{"price": bid[0], "quantity": bid[1]} for bid in valid_bids if bid[1] > large_order_threshold]
-                large_asks = [{"price": ask[0], "quantity": ask[1]} for ask in valid_asks if ask[1] > large_order_threshold]
-                
-                # Add to order book
-                order_book["large_orders"] = {
-                    "bids": large_bids,
-                    "asks": large_asks,
-                    "threshold": large_order_threshold,
-                    "count": len(large_bids) + len(large_asks)
-                }
-            
-            # Calculate price impact for different trade sizes
-            try:
-                # Calculate price impact to sell/buy significant amount
-                # This estimates how much the price would move for a large market order
-                benchmark_amounts = [1, 5, 10, 25, 50]  # in BTC
-                price_impact = {"buy": {}, "sell": {}}
-                
-                # Calculate price impact for buys
-                for amount in benchmark_amounts:
-                    impact_price = self._calculate_price_impact(valid_asks, amount, "buy")
-                    if impact_price and valid_asks and len(valid_asks[0]) >= 1:
-                        best_ask = valid_asks[0][0]
-                        if best_ask > 0:
-                            price_impact["buy"][str(amount)] = round((impact_price - best_ask) / best_ask * 100, 2)
-                
-                # Calculate price impact for sells
-                for amount in benchmark_amounts:
-                    impact_price = self._calculate_price_impact(valid_bids, amount, "sell")
-                    if impact_price and valid_bids and len(valid_bids[0]) >= 1:
-                        best_bid = valid_bids[0][0]
-                        if best_bid > 0:
-                            price_impact["sell"][str(amount)] = round((best_bid - impact_price) / best_bid * 100, 2)
-                
-                order_book["price_impact"] = price_impact
-            except Exception as e:
-                logger.error(f"Error calculating price impact: {e}")
-            
-            logger.info("✅ Enhanced order book data with advanced metrics")
+            return enhanced
             
         except Exception as e:
-            logger.error(f"Error enhancing order book data: {e}")
+            logger.error(f"Error enhancing order book data: {str(e)}")
+            logger.error(traceback.format_exc())
+            return order_book
     
     def _calculate_price_impact(self, orders: List[List[float]], target_amount: float, side: str) -> Optional[float]:
         """
@@ -2579,4 +2543,173 @@ class DataEnricher:
             # Return empty DataFrame
             import pandas as pd
             return pd.DataFrame()
+    
+    def _calculate_indicators(self, df: pd.DataFrame, timeframe: str) -> Dict[str, Any]:
+        """Calculate technical indicators for a given timeframe"""
+        try:
+            indicators = {}
+            
+            # RSI (14 periods)
+            rsi = ta.momentum.RSIIndicator(df['close'], window=14)
+            indicators['RSI'] = float(rsi.rsi().iloc[-1])
+            
+            # Bollinger Bands
+            bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+            upper_band = bb.bollinger_hband()
+            lower_band = bb.bollinger_lband()
+            middle_band = bb.bollinger_mavg()
+            
+            # Calculate Bollinger Bands Width
+            bb_width = (upper_band - lower_band) / middle_band
+            indicators['Bollinger_Bands_Width'] = float(bb_width.iloc[-1])
+            
+            # MACD (if 1h timeframe)
+            if timeframe == '1h':
+                macd = ta.trend.MACD(df['close'])
+                indicators['MACD'] = {
+                    'MACD': float(macd.macd().iloc[-1]),
+                    'Signal': float(macd.macd_signal().iloc[-1]),
+                    'Histogram': float(macd.macd_diff().iloc[-1])
+                }
+                
+                # Add other 1h specific indicators
+                # Parabolic SAR
+                psar = ta.trend.PSARIndicator(df['high'], df['low'], df['close'])
+                psar_value = float(psar.psar().iloc[-1])
+                current_price = float(df['close'].iloc[-1])
+                indicators['Parabolic_SAR'] = "ABOVE" if psar_value > current_price else "BELOW"
+                
+                # EMA 50/200 Crossover
+                ema_50 = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator()
+                ema_200 = ta.trend.EMAIndicator(df['close'], window=200).ema_indicator()
+                
+                if ema_50.iloc[-1] > ema_200.iloc[-1]:
+                    if ema_50.iloc[-2] <= ema_200.iloc[-2]:
+                        indicators['EMA_50_200_Crossover'] = "BULLISH_CROSS"
+                    else:
+                        indicators['EMA_50_200_Crossover'] = "BULLISH"
+                elif ema_50.iloc[-1] < ema_200.iloc[-1]:
+                    if ema_50.iloc[-2] >= ema_200.iloc[-2]:
+                        indicators['EMA_50_200_Crossover'] = "BEARISH_CROSS"
+                    else:
+                        indicators['EMA_50_200_Crossover'] = "BEARISH"
+                else:
+                    indicators['EMA_50_200_Crossover'] = "NEUTRAL"
+                
+                # Williams %R
+                williams_r = ta.momentum.WilliamsRIndicator(df['high'], df['low'], df['close'])
+                indicators['Williams_%R'] = float(williams_r.williams_r().iloc[-1])
+                
+                # ADX
+                adx = self._calculate_adx(df)
+                indicators['ADX'] = float(adx)
+                
+            elif timeframe == '5m':
+                # Add 5m specific indicators
+                # Volume Weighted Oscillator (WVO)
+                typical_price = (df['high'] + df['low'] + df['close']) / 3
+                volume_ma = df['volume'].rolling(window=20).mean()
+                wvo = ((typical_price * df['volume']) - (typical_price.rolling(window=20).mean() * volume_ma)) / (typical_price.rolling(window=20).std() * volume_ma.std())
+                indicators['WVO'] = float(wvo.iloc[-1])
+                
+                # Adaptive RSI (using EMA-based smoothing)
+                close_diff = df['close'].diff()
+                gains = close_diff.where(close_diff > 0, 0)
+                losses = -close_diff.where(close_diff < 0, 0)
+                
+                avg_gains = gains.ewm(span=14, adjust=False).mean()
+                avg_losses = losses.ewm(span=14, adjust=False).mean()
+                
+                rs = avg_gains / avg_losses
+                arsi = 100 - (100 / (1 + rs))
+                indicators['ARSI'] = float(arsi.iloc[-1])
+                
+                # Volume Weighted Intensity Oscillator (VWIO)
+                price_change = df['close'].diff()
+                volume_intensity = price_change * df['volume']
+                vwio = volume_intensity.rolling(window=20).mean() / df['volume'].rolling(window=20).mean()
+                indicators['VWIO'] = float(vwio.iloc[-1])
+                
+                # ADX for 5m
+                adx = self._calculate_adx(df)
+                indicators['ADX'] = float(adx)
+            
+            return indicators
+            
+        except Exception as e:
+            logger.error(f"Error calculating indicators for {timeframe}: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {}
+    
+    def _calculate_correlations(self, klines_data: Dict[str, List[List[Any]]]) -> Dict[str, float]:
+        """Calculate correlations between different timeframes and assets"""
+        try:
+            # Convert 1h klines data to DataFrame
+            df_1h = pd.DataFrame(klines_data.get('1h', []), columns=[
+                'open_time', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+            ])
+            
+            if df_1h.empty:
+                logger.warning("No 1h timeframe data available for correlation analysis")
+                return {}
+            
+            # Convert numeric columns
+            numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+            for col in numeric_columns:
+                df_1h[col] = pd.to_numeric(df_1h[col], errors='coerce')
+            
+            # Calculate correlations
+            correlations = {
+                'price_volume_correlation': df_1h['close'].corr(df_1h['volume']),
+                'high_low_correlation': df_1h['high'].corr(df_1h['low']),
+                'open_close_correlation': df_1h['open'].corr(df_1h['close'])
+            }
+            
+            # Calculate volatility correlation
+            df_1h['returns'] = df_1h['close'].pct_change()
+            df_1h['volatility'] = df_1h['returns'].rolling(window=14).std()
+            correlations['volatility_volume_correlation'] = df_1h['volatility'].corr(df_1h['volume'])
+            
+            # Log correlations
+            logger.info(f"✅ Calculated correlations: {correlations}")
+            
+            return correlations
+            
+        except Exception as e:
+            logger.error(f"Error calculating correlations: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {}
+
+    def _get_default_sentiment(self) -> Dict[str, Any]:
+        """Get default sentiment values when Santiment API is not available"""
+        return {
+            'social_volume': 0.0,
+            'social_dominance': 0.0,
+            'sentiment_score': 0.5,
+            'news_sentiment': {
+                'positive': 0.0,
+                'negative': 0.0,
+                'neutral': 1.0
+            },
+            'github_activity': {
+                'commits': 0,
+                'contributors': 0,
+                'stars': 0
+            },
+            'whale_transactions': {
+                'count': 0,
+                'volume': 0.0
+            },
+            'exchange_flow': {
+                'inflow': 0.0,
+                'outflow': 0.0,
+                'net_flow': 0.0
+            },
+            'fear_and_greed': {
+                'value': 50,
+                'classification': 'Neutral'
+            }
+        }
         

@@ -113,7 +113,7 @@ class DeepSeekAPI:
             symbol = data.get("symbol", "BTCUSDT")
             
             # Format prompt
-            prompt = self._format_prompt(data)
+            prompt = self._format_trading_prompt(data)
             
             # Prepare API request
             messages = [
@@ -141,64 +141,8 @@ class DeepSeekAPI:
                     logger.warning("Generating mock prediction as fallback")
                     return self._boost_confidence(self._generate_mock_prediction(data))
                 
-                # Extract the response content
-                content = response.choices[0].message.content
-                
-                # Parse JSON content
-                try:
-                    prediction = json.loads(content)
-                    
-                    # Add symbol and timestamp if not present
-                    if "symbol" not in prediction:
-                        prediction["symbol"] = symbol
-                        
-                    if "timestamp" not in prediction:
-                        prediction["timestamp"] = int(time.time() * 1000)
-                        
-                    # Log the prediction
-                    logger.info(f"Received prediction from DeepSeek API: {json.dumps(prediction)}")
-                    
-                    # Validate prediction structure
-                    try:
-                        self._validate_prediction(prediction)
-                        
-                        # Apply confidence boosting
-                        prediction = self._boost_confidence(prediction)
-                        
-                        # Save prediction for later use
-                        self._save_prediction({
-                            "messages": messages,
-                            "symbol": symbol  # Add symbol to payload
-                        }, prediction)
-                        
-                        return prediction
-                    except ValueError as ve:
-                        # If validation fails, log the error but don't fallback if we already have a valid prediction structure
-                        # The error might be due to our validation expectations not matching the API's response structure
-                        logger.error(f"DeepSeek API request error: {str(ve)}")
-                        
-                        # Check if the prediction has the minimal structure we need
-                        if "prediction" in prediction and isinstance(prediction["prediction"], dict):
-                            pred_obj = prediction["prediction"]
-                            # If we have an action, we can still use this prediction
-                            if "action" in pred_obj and pred_obj["action"] in ["BUY", "SELL", "HOLD"]:
-                                logger.info("Using prediction despite validation error - contains required fields")
-                                # Save prediction for later use
-                                self._save_prediction({
-                                    "messages": messages,
-                                    "symbol": symbol  # Add symbol to payload
-                                }, prediction)
-                                return prediction
-                        
-                        # If we got here, the prediction is too malformed to use
-                        logger.warning("Generating mock prediction as fallback")
-                        return self._generate_mock_prediction(data)
-                        
-                except json.JSONDecodeError:
-                    logger.error(f"Failed to parse JSON from DeepSeek API response: {content}")
-                    # Fallback to mock prediction
-                    logger.warning("Generating mock prediction as fallback")
-                    return self._generate_mock_prediction(data)
+                # Process the response
+                return self._process_response(response, data)
                     
             except Exception as api_error:
                 logger.error(f"API call error: {str(api_error)}")
@@ -212,362 +156,193 @@ class DeepSeekAPI:
             logger.warning("Generating mock prediction as fallback")
             return self._generate_mock_prediction(data)
     
-    def _format_prompt(self, data: Dict[str, Any]) -> str:
-        """
-        Format market data into a detailed prompt for the AI
-        
-        Args:
-            data: Enriched market data
+    def _process_response(self, response: Any, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process the response from DeepSeek API"""
+        try:
+            # Extract the response content from pydantic model
+            content = response.choices[0].message.content
             
-        Returns:
-            Formatted prompt
-        """
-        # Check if this is a position management request
-        if data.get('request_type') == 'position_management':
-            return self._format_position_management_prompt(data)
+            # Parse the JSON response
+            prediction = json.loads(content)
             
-        # Regular trade signal prompt (existing code)
-        # Ensure all required sections exist to avoid KeyErrors
-        data_sections = {
-            'timeframes': data.get('timeframes', {}),
-            'order_book': data.get('order_book', {}),
-            'sentiment': data.get('sentiment', {}),
-            'macro_factors': data.get('macro_factors', {}),
-            'correlations': data.get('correlations', {}),
-            'futures_data': data.get('futures_data', {})
-        }
-        
-        # Ensure timeframes exist
-        timeframes = data_sections['timeframes']
-        timeframe_5m = timeframes.get('5m', {'price': {}, 'indicators': {}})
-        timeframe_1h = timeframes.get('1h', {'price': {}, 'indicators': {}})
-        
-        # Ensure price and indicators exist
-        price_5m = timeframe_5m.get('price', {})
-        indicators_5m = timeframe_5m.get('indicators', {})
-        price_1h = timeframe_1h.get('price', {})
-        indicators_1h = timeframe_1h.get('indicators', {})
-        
-        # Convert numpy types to Python native types for JSON serialization
-        def convert_numpy_types(obj):
-            if isinstance(obj, dict):
-                return {k: convert_numpy_types(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_numpy_types(item) for item in obj]
-            elif isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return convert_numpy_types(obj.tolist())
-            elif isinstance(obj, np.bool_):
-                return bool(obj)
-            else:
-                return obj
-                
-        # Convert indicators to native Python types
-        indicators_5m = convert_numpy_types(indicators_5m)
-        indicators_1h = convert_numpy_types(indicators_1h)
-        
-        # Debug log the indicators
-        logger.info(f"5m indicators before formatting: {json.dumps(indicators_5m)}")
-        logger.info(f"1h indicators before formatting: {json.dumps(indicators_1h)}")
-        
-        # Add mock data for missing indicators to ensure they're not N/A
-        # 5m mock indicators
-        if 'RSI' not in indicators_5m:
-            logger.warning("RSI missing in 5m indicators, adding mock data")
-            indicators_5m['RSI'] = 50.0
-        
-        if 'Bollinger_Bands_Width' not in indicators_5m:
-            logger.warning("Bollinger_Bands_Width missing in 5m indicators, adding mock data")
-            indicators_5m['Bollinger_Bands_Width'] = 0.02
+            # Add timestamp and symbol
+            prediction['timestamp'] = int(time.time() * 1000)
+            prediction['symbol'] = data.get('symbol', 'BTCUSDT')
             
-        if 'WVO' not in indicators_5m:
-            logger.warning("WVO missing in 5m indicators, adding mock data")
-            indicators_5m['WVO'] = 0.5
+            # Wrap in prediction object if not already
+            if 'prediction' not in prediction:
+                prediction = {'prediction': prediction}
             
-        if 'ARSI' not in indicators_5m:
-            logger.warning("ARSI missing in 5m indicators, adding mock data")
-            indicators_5m['ARSI'] = 55.0
+            logger.info(f"✅ Received prediction from DeepSeek API: {json.dumps(prediction)}")
+            return prediction
             
-        if 'VWIO' not in indicators_5m:
-            logger.warning("VWIO missing in 5m indicators, adding mock data")
-            indicators_5m['VWIO'] = 0.6
+        except Exception as e:
+            logger.error(f"DeepSeek API request error: {str(e)}")
+            logger.error(traceback.format_exc())
+            logger.warning("⚠️ Generating mock prediction as fallback")
+            return self._generate_mock_prediction(data)
+    
+    def _format_trading_prompt(self, market_data: Dict[str, Any]) -> str:
+        """Format the prompt for trading signals"""
+        try:
+            # Get indicators
+            indicators = market_data.get('indicators', {})
+            indicators_5m = indicators.get('5m', {})
+            indicators_1h = indicators.get('1h', {})
             
-        # 1h mock indicators
-        if 'RSI' not in indicators_1h:
-            logger.warning("RSI missing in 1h indicators, adding mock data")
-            indicators_1h['RSI'] = 48.0
+            # Get order book data
+            order_book = market_data.get('order_book', {})
+            order_book_metrics = order_book.get('metrics', {})
             
-        if 'Bollinger_Bands_Width' not in indicators_1h:
-            logger.warning("Bollinger_Bands_Width missing in 1h indicators, adding mock data")
-            indicators_1h['Bollinger_Bands_Width'] = 0.025
-            
-        if 'MACD' not in indicators_1h or not isinstance(indicators_1h['MACD'], dict):
-            logger.warning("MACD missing or not a dict in 1h indicators, adding mock data")
-            indicators_1h['MACD'] = {"MACD": 10.5, "Signal": 9.8, "Histogram": 0.7}
-            
-        # Debug log the indicators after adding mock data
-        logger.info(f"5m indicators after adding mock data: {json.dumps(indicators_5m)}")
-        logger.info(f"1h indicators after adding mock data: {json.dumps(indicators_1h)}")
-        
-        # Ensure order book data exists
-        order_book = data_sections['order_book']
-        
-        # Ensure macro factors exist
-        macro_factors = data_sections['macro_factors']
-        
-        # Ensure futures data exists
-        futures_data = data_sections['futures_data']
-        
-        # Always in futures mode
-        futures_mode = True
-        
-        prompt = f"""Analyze the following Bitcoin market data and provide a trading signal for futures market.
+            # Format prompt
+            prompt = f"""Please analyze the following market data for {market_data.get('symbol', 'BTCUSDT')} and provide trading signals:
 
-Symbol: {data.get('symbol', 'BTCUSDT')}
-Timestamp: {data.get('timestamp', int(time.time()))}
-Market Type: Futures
+5-Minute Timeframe Indicators:
+- RSI: {indicators_5m.get('RSI', 50.0):.2f}
+- Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 0.02):.4f}
+- Volume Weighted Oscillator (WVO): {indicators_5m.get('WVO', 0.0):.2f}
+- Adaptive RSI (ARSI): {indicators_5m.get('ARSI', 50.0):.2f}
+- Volume Weighted Intensity (VWIO): {indicators_5m.get('VWIO', 0.0):.2f}
+- ADX: {indicators_5m.get('ADX', 25.0):.2f}
 
-## 5-Minute Timeframe
-Price:
-- Open: {price_5m.get('open', 'N/A')}
-- High: {price_5m.get('high', 'N/A')}
-- Low: {price_5m.get('low', 'N/A')}
-- Close: {price_5m.get('close', 'N/A')}
-- Volume: {price_5m.get('volume', 'N/A')}
+1-Hour Timeframe Indicators:
+- RSI: {indicators_1h.get('RSI', 48.0):.2f}
+- Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 0.025):.4f}
+- MACD:
+  * MACD Line: {indicators_1h.get('MACD', {}).get('MACD', 0.0):.2f}
+  * Signal Line: {indicators_1h.get('MACD', {}).get('Signal', 0.0):.2f}
+  * Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 0.0):.2f}
+- Parabolic SAR: {indicators_1h.get('Parabolic_SAR', 'NEUTRAL')}
+- EMA 50/200 Crossover: {indicators_1h.get('EMA_50_200_Crossover', 'NEUTRAL')}
+- Williams %R: {indicators_1h.get('Williams_%R', -50.0):.2f}
+- ADX: {indicators_1h.get('ADX', 25.0):.2f}
 
-Indicators:
-- RSI: {indicators_5m.get('RSI', 'N/A')}
-- Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 'N/A')}
-- WVO: {indicators_5m.get('WVO', 'N/A')}
-- ARSI: {indicators_5m.get('ARSI', 'N/A')}
-- VWIO: {indicators_5m.get('VWIO', 'N/A')}
+Order Book Analysis:
+- Bid/Ask Ratio: {order_book_metrics.get('bid_ask_ratio', 1.0):.4f}
+- Order Imbalance: {order_book_metrics.get('order_imbalance', 0.0):.4f}
+- Spread: {order_book_metrics.get('spread', 0.0):.2f}
+- Spread %: {order_book_metrics.get('spread_percentage', 0.0):.4f}%
+- VWAP:
+  * Bid VWAP: {order_book_metrics.get('bid_vwap', 0.0):.2f}
+  * Ask VWAP: {order_book_metrics.get('ask_vwap', 0.0):.2f}
+  * VWAP Midpoint: {order_book_metrics.get('vwap_midpoint', 0.0):.2f}
 
-## 1-Hour Timeframe
-Price:
-- Open: {price_1h.get('open', 'N/A')}
-- High: {price_1h.get('high', 'N/A')}
-- Low: {price_1h.get('low', 'N/A')}
-- Close: {price_1h.get('close', 'N/A')}
-- Volume: {price_1h.get('volume', 'N/A')}
+Futures Data:
+- Funding Rate: {market_data.get('futures_data', {}).get('funding_rate', 0.0):.6f}
+- Next Funding Time: {market_data.get('futures_data', {}).get('next_funding_time', 'Unknown')}
+- Open Interest: {market_data.get('futures_data', {}).get('open_interest', 0.0):.2f}
+- Open Interest Value: ${market_data.get('futures_data', {}).get('open_interest_value', 0.0):.2f}
 
-Indicators:
-- RSI: {indicators_1h.get('RSI', 'N/A')}
-- Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 'N/A')}
-- MACD: {indicators_1h.get('MACD', {}).get('MACD', 'N/A')}
-- MACD Signal: {indicators_1h.get('MACD', {}).get('Signal', 'N/A')}
-- MACD Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 'N/A')}
-- Parabolic SAR: {indicators_1h.get('Parabolic_SAR', 'N/A')}
-- EMA 50/200 Crossover: {indicators_1h.get('EMA_50_200_Crossover', 'N/A')}
-- Ichimoku Cloud: {indicators_1h.get('Ichimoku', 'N/A')}
-- Fibonacci Levels: {json.dumps(indicators_1h.get('Fibonacci_Levels', {}), indent=2)}
-- Volume Profile POC: {indicators_1h.get('Volume_Profile_POC', 'N/A')}
-- Pivot Points: {json.dumps(indicators_1h.get('Pivot_Points', {}), indent=2)}
-- Williams %R: {indicators_1h.get('Williams_%R', 'N/A')}
-- VWAP: {indicators_1h.get('VWAP', 'N/A')}
-- CVD: {indicators_1h.get('CVD', 'N/A')}
-- ADX: {indicators_1h.get('ADX', 25.0)}
+Based on this data, please provide:
+1. Trading action (BUY/SELL/HOLD)
+2. Confidence level (0.0-1.0)
+3. Suggested stop loss price
+4. Suggested take profit price
+5. Brief reasoning for the recommendation
+6. Risk/reward ratio for the trade
 
-## Order Book Analysis
-- Bid-Ask Spread: {order_book.get('bid_ask_spread', 'N/A')}
-- Order Imbalance: {order_book.get('order_imbalance', 'N/A')}
-- Large Orders: {json.dumps(order_book.get('large_orders', {}), indent=2)}
-- Depth Imbalance: {order_book.get('depth_imbalance', 'N/A')}
-- Bid-Ask Ratio: {order_book.get('bid_ask_ratio', 'N/A')}
-
-## Market Sentiment
-- Funding Rate: {data_sections['sentiment'].get('funding_rate', 'N/A')}
-- Fear & Greed Index: {data_sections['sentiment'].get('fear_greed_index', 'N/A')}
-- Social Volume: {data_sections['sentiment'].get('social_volume', 'N/A')}
-- News Sentiment: {data_sections['sentiment'].get('news_sentiment_score', 'N/A')}
-- Whale Activity: {json.dumps(data_sections['sentiment'].get('whale_activity', {}), indent=2)}
-
-## Macro Factors
-- Exchange Reserves: {macro_factors.get('exchange_reserves', 'N/A')}
-- BTC Hash Rate: {macro_factors.get('btc_hash_rate', 'N/A')}
-- FOMC Event Impact: {macro_factors.get('fomc_event_impact', 'N/A')}
-- Traditional Markets: {json.dumps(macro_factors.get('traditional_markets', {}), indent=2)}
-- Bond Yields: {json.dumps(macro_factors.get('bond_yields', {}), indent=2)}
-- Inflation Expectations: {macro_factors.get('inflation_expectations', 'N/A')}
-
-## Correlation Analysis
-- BTC-ETH Correlation: {data_sections['correlations'].get('btc_eth_correlation', 'N/A')}
-- BTC-SP500 Correlation: {data_sections['correlations'].get('btc_sp500_correlation', 'N/A')}
-- BTC-Gold Correlation: {data_sections['correlations'].get('btc_gold_correlation', 'N/A')}
-- BTC-DXY Correlation: {data_sections['correlations'].get('btc_dxy_correlation', 'N/A')}
-"""
-
-        # Add futures-specific data if available
-        if futures_mode:
-            prompt += f"""
-## Futures Data
-- Funding Rate: {futures_data.get('funding_rate', 'N/A')}
-- Next Funding Time: {futures_data.get('next_funding_time', 'N/A')}
-- Open Interest: {futures_data.get('open_interest', 'N/A')}
-- Max Leverage: {futures_data.get('max_leverage', 'N/A')}
-
-## Funding Rate Analysis
-- Sentiment: {futures_data.get('funding_rate_analysis', {}).get('sentiment', 'N/A')}
-- Magnitude: {futures_data.get('funding_rate_analysis', {}).get('magnitude', 'N/A')}
-- Annualized Rate: {futures_data.get('funding_rate_analysis', {}).get('annualized_rate', 'N/A')}
-
-## Open Interest Analysis
-- Value: {futures_data.get('open_interest_analysis', {}).get('formatted', 'N/A')}
-
-## Leverage Analysis
-- Maximum Leverage: {futures_data.get('leverage_analysis', {}).get('max_leverage', 'N/A')}
-- Category: {futures_data.get('leverage_analysis', {}).get('category', 'N/A')}
-"""
-
-        prompt += f"""
-Based on this data, provide a trading signal in the following JSON format:
+Please format your response as a JSON object with the following structure:
 {{
-  "symbol": "BTCUSDT",
-  "timestamp": [current_timestamp],
-  "prediction": {{
-    "action": "[BUY/SELL/HOLD]",
-    "confidence": [value between 0 and 1],
-    "stop_loss": [suggested stop loss price],
-    "take_profit": [suggested take profit price],
-    "reasoning": [detailed reasoning for the recommendation],
-    "risk_reward_ratio": [risk reward ratio]
-  }}
-}}
-"""
-        return prompt
+    "action": "BUY/SELL/HOLD",
+    "confidence": 0.XX,
+    "stop_loss": XXX.XX,
+    "take_profit": XXX.XX,
+    "reasoning": "Your analysis here",
+    "risk_reward_ratio": X.XX
+}}"""
+            
+            return prompt
+            
+        except Exception as e:
+            logger.error(f"Error formatting trading prompt: {str(e)}")
+            logger.error(traceback.format_exc())
+            return ""
     
     def _format_position_management_prompt(self, data: Dict[str, Any]) -> str:
-        """
-        Format a prompt for managing existing positions instead of opening new ones
-        
-        Args:
-            data: Enriched market data including current positions
+        """Format the prompt for position management"""
+        try:
+            # Get position data
+            position = data.get('position', {})
             
-        Returns:
-            Formatted prompt for position management
-        """
-        # Extract active positions data
-        positions = data.get('active_positions', [])
-        if not positions:
-            return self._format_prompt(data)  # No positions, use regular prompt
+            # Get indicators
+            indicators = data.get('indicators', {})
+            indicators_5m = indicators.get('5m', {})
+            indicators_1h = indicators.get('1h', {})
             
-        # Ensure all required sections exist to avoid KeyErrors - same as regular prompt
-        data_sections = {
-            'timeframes': data.get('timeframes', {}),
-            'order_book': data.get('order_book', {}),
-            'sentiment': data.get('sentiment', {}),
-            'macro_factors': data.get('macro_factors', {}),
-            'correlations': data.get('correlations', {}),
-            'futures_data': data.get('futures_data', {})
-        }
-        
-        # Ensure timeframes exist
-        timeframes = data_sections['timeframes']
-        timeframe_5m = timeframes.get('5m', {'price': {}, 'indicators': {}})
-        timeframe_1h = timeframes.get('1h', {'price': {}, 'indicators': {}})
-        timeframe_4h = timeframes.get('4h', {'price': {}, 'indicators': {}})
-        
-        # Ensure price and indicators exist
-        price_5m = timeframe_5m.get('price', {})
-        indicators_5m = timeframe_5m.get('indicators', {})
-        price_1h = timeframe_1h.get('price', {})
-        indicators_1h = timeframe_1h.get('indicators', {})
-        price_4h = timeframe_4h.get('price', {}) if timeframe_4h else {}
-        indicators_4h = timeframe_4h.get('indicators', {}) if timeframe_4h else {}
-        
-        # Format positions information
-        positions_info = "\n".join([
-            f"Position {i+1}: {pos.get('symbol', 'UNKNOWN')} {pos.get('side', 'UNKNOWN')} "
-            f"Quantity: {pos.get('quantity', 0)} "
-            f"Entry Price: {pos.get('entry_price', 0)} "
-            f"Current PnL: {pos.get('pnl_usd', 'UNKNOWN')} USD "
-            f"Entry Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(pos.get('timestamp', 0)/1000))}"
-            for i, pos in enumerate(positions)
-        ])
-        
-        prompt = f"""Analyze the following Bitcoin market data and provide management advice for the EXISTING positions. 
-DO NOT recommend opening new positions since we've reached our maximum allowed positions.
+            # Get order book data
+            order_book = data.get('order_book', {})
+            order_book_metrics = order_book.get('metrics', {})
+            
+            # Format prompt
+            prompt = f"""Please analyze the following market data and provide position management advice for {data.get('symbol', 'BTCUSDT')}:
 
-Symbol: {data.get('symbol', 'BTCUSDT')}
-Timestamp: {data.get('timestamp', int(time.time()))}
-Market Type: Futures
+Current Position:
+- Side: {position.get('side', 'UNKNOWN')}
+- Entry Price: {position.get('entry_price', 0.0):.2f}
+- Current Price: {position.get('mark_price', 0.0):.2f}
+- Unrealized PnL: {position.get('unrealized_pnl', 0.0):.2f} ({position.get('roe', 0.0):.2f}%)
+- Position Size: {position.get('size', 0.0):.8f}
+- Leverage: {position.get('leverage', 1)}x
+- Margin Type: {position.get('margin_type', 'ISOLATED')}
 
-## CURRENT ACTIVE POSITIONS - NEEDS ADVICE
-{positions_info}
+5-Minute Timeframe Indicators:
+- RSI: {indicators_5m.get('RSI', 50.0):.2f}
+- Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 0.02):.4f}
+- Volume Weighted Oscillator (WVO): {indicators_5m.get('WVO', 0.0):.2f}
+- Adaptive RSI (ARSI): {indicators_5m.get('ARSI', 50.0):.2f}
+- Volume Weighted Intensity (VWIO): {indicators_5m.get('VWIO', 0.0):.2f}
+- ADX: {indicators_5m.get('ADX', 25.0):.2f}
 
-## CURRENT MARKET CONDITIONS
+1-Hour Timeframe Indicators:
+- RSI: {indicators_1h.get('RSI', 48.0):.2f}
+- Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 0.025):.4f}
+- MACD:
+  * MACD Line: {indicators_1h.get('MACD', {}).get('MACD', 0.0):.2f}
+  * Signal Line: {indicators_1h.get('MACD', {}).get('Signal', 0.0):.2f}
+  * Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 0.0):.2f}
+- Parabolic SAR: {indicators_1h.get('Parabolic_SAR', 'NEUTRAL')}
+- EMA 50/200 Crossover: {indicators_1h.get('EMA_50_200_Crossover', 'NEUTRAL')}
+- Williams %R: {indicators_1h.get('Williams_%R', -50.0):.2f}
+- ADX: {indicators_1h.get('ADX', 25.0):.2f}
 
-## 5-Minute Timeframe
-Price:
-- Open: {price_5m.get('open', 'N/A')}
-- High: {price_5m.get('high', 'N/A')}
-- Low: {price_5m.get('low', 'N/A')}
-- Close: {price_5m.get('close', 'N/A')}
-- Volume: {price_5m.get('volume', 'N/A')}
+Order Book Analysis:
+- Bid/Ask Ratio: {order_book_metrics.get('bid_ask_ratio', 1.0):.4f}
+- Order Imbalance: {order_book_metrics.get('order_imbalance', 0.0):.4f}
+- Spread: {order_book_metrics.get('spread', 0.0):.2f}
+- Spread %: {order_book_metrics.get('spread_percentage', 0.0):.4f}%
+- VWAP:
+  * Bid VWAP: {order_book_metrics.get('bid_vwap', 0.0):.2f}
+  * Ask VWAP: {order_book_metrics.get('ask_vwap', 0.0):.2f}
+  * VWAP Midpoint: {order_book_metrics.get('vwap_midpoint', 0.0):.2f}
 
-Indicators:
-- RSI: {indicators_5m.get('RSI', 'N/A')}
-- Bollinger Bands Width: {indicators_5m.get('Bollinger_Bands_Width', 'N/A')}
-- WVO: {indicators_5m.get('WVO', 'N/A')}
-- ARSI: {indicators_5m.get('ARSI', 'N/A')}
-- VWIO: {indicators_5m.get('VWIO', 'N/A')}
+Futures Data:
+- Funding Rate: {data.get('futures_data', {}).get('funding_rate', 0.0):.6f}
+- Next Funding Time: {data.get('futures_data', {}).get('next_funding_time', 'Unknown')}
+- Open Interest: {data.get('futures_data', {}).get('open_interest', 0.0):.2f}
+- Open Interest Value: ${data.get('futures_data', {}).get('open_interest_value', 0.0):,.2f}
 
-## 1-Hour Timeframe
-Price:
-- Open: {price_1h.get('open', 'N/A')}
-- High: {price_1h.get('high', 'N/A')}
-- Low: {price_1h.get('low', 'N/A')}
-- Close: {price_1h.get('close', 'N/A')}
-- Volume: {price_1h.get('volume', 'N/A')}
+Based on this data, please provide position management advice:
+1. Action (HOLD/CLOSE/PARTIAL_CLOSE)
+2. If PARTIAL_CLOSE, what percentage to close
+3. Update stop loss price (if needed)
+4. Update take profit price (if needed)
+5. Brief reasoning for the recommendation
 
-Indicators:
-- RSI: {indicators_1h.get('RSI', 'N/A')}
-- Bollinger Bands Width: {indicators_1h.get('Bollinger_Bands_Width', 'N/A')}
-- MACD: {indicators_1h.get('MACD', {}).get('MACD', 'N/A')}
-- MACD Signal: {indicators_1h.get('MACD', {}).get('Signal', 'N/A')}
-- MACD Histogram: {indicators_1h.get('MACD', {}).get('Histogram', 'N/A')}
-
-## 4-Hour Timeframe
-Price:
-- Open: {price_4h.get('open', 'N/A')}
-- High: {price_4h.get('high', 'N/A')}
-- Low: {price_4h.get('low', 'N/A')}
-- Close: {price_4h.get('close', 'N/A')}
-- Volume: {price_4h.get('volume', 'N/A')}
-
-Indicators:
-- RSI: {indicators_4h.get('RSI', 'N/A')}
-- ADX: {indicators_4h.get('ADX', 25.0)}
-- ATR: {indicators_4h.get('ATR', 'N/A')}
-
-## Order Book
-Asks (Sell Orders): {order_book.get('asks', 'N/A')}
-Bids (Buy Orders): {order_book.get('bids', 'N/A')}
-Imbalance: {order_book.get('imbalance', 'N/A')}
-
-## Futures Data
-Funding Rate: {futures_data.get('funding_rate', 'N/A')}
-Open Interest: {futures_data.get('open_interest', 'N/A')}
-Long-Short Ratio: {futures_data.get('long_short_ratio', 'N/A')}
-
-## Market Sentiment
-News Sentiment: {data_sections['sentiment'].get('news_sentiment', 'N/A')}
-Social Media Sentiment: {data_sections['sentiment'].get('social_sentiment', 'N/A')}
-Fear & Greed Index: {data_sections['sentiment'].get('fear_greed_index', 'N/A')}
-
-Based on the above market data, provide advice on what to do with the EXISTING positions.
-For EACH position, recommend one of the following actions with justification:
-1. HOLD - Continue holding the position
-2. CLOSE - Close the position completely
-3. PARTIAL_CLOSE - Close part of the position (specify percentage)
-4. MODIFY_SL_TP - Modify stop loss or take profit levels (specify new levels)
-
-Include confidence level (0.0-1.0) for each recommendation.
-"""
-        
-        return prompt
+Please format your response as a JSON object with the following structure:
+{
+    "action": "HOLD/CLOSE/PARTIAL_CLOSE",
+    "close_percentage": XX.XX,  # Only if action is PARTIAL_CLOSE
+    "stop_loss": XXX.XX,
+    "take_profit": XXX.XX,
+    "reasoning": "Your analysis here"
+}"""
+            
+            return prompt
+            
+        except Exception as e:
+            logger.error(f"Error formatting position management prompt: {str(e)}")
+            logger.error(traceback.format_exc())
+            return ""
     
     def _get_system_prompt(self) -> str:
         """
@@ -775,76 +550,23 @@ Only return valid JSON. Never include natural language explanations outside the 
             logger.error(f"Error saving prediction: {str(e)}")
     
     def _generate_mock_prediction(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Generate mock prediction for testing
+        """Generate a mock prediction when the API fails"""
+        current_price = float(data.get('current_price', 0.0))
         
-        Args:
-            data: Market data
-            
-        Returns:
-            Mock prediction
-        """
-        # Get symbol and timestamp from data
-        symbol = data.get("symbol", "BTCUSDT")
-        timestamp = data.get("timestamp", int(time.time()))
-        
-        # Generate a random action (with bias towards HOLD)
-        actions = ["BUY", "SELL", "HOLD"]
-        action_weights = [0.3, 0.3, 0.4]  # 30% BUY, 30% SELL, 40% HOLD
-        action = random.choices(actions, weights=action_weights, k=1)[0]
-        
-        # Generate a random confidence
-        confidence = round(random.uniform(0.2, 0.99), 2)
-        
-        # Get current price from data if available
-        current_price = 0
-        if "timeframes" in data and "1h" in data["timeframes"] and "price" in data["timeframes"]["1h"]:
-            current_price = data["timeframes"]["1h"]["price"].get("close", 0)
-        
-        if current_price <= 0 and "timeframes" in data and "5m" in data["timeframes"] and "price" in data["timeframes"]["5m"]:
-            current_price = data["timeframes"]["5m"]["price"].get("close", 0)
-            
-        if current_price <= 0:
-            current_price = 50000  # Fallback default BTC price
-        
-        # Generate stop loss and take profit with proper rounding
-        if action == "BUY":
-            # For BTCUSDT, round to 1 decimal place to avoid precision issues
-            if symbol == "BTCUSDT":
-                stop_loss = round(current_price * 0.98, 1)  # 2% below current price
-                take_profit = round(current_price * 1.05, 1)  # 5% above current price
-            else:
-                stop_loss = current_price * 0.98  # 2% below current price
-                take_profit = current_price * 1.05  # 5% above current price
-        elif action == "SELL":
-            if symbol == "BTCUSDT":
-                stop_loss = round(current_price * 1.02, 1)  # 2% above current price
-                take_profit = round(current_price * 0.95, 1)  # 5% below current price
-            else:
-                stop_loss = current_price * 1.02  # 2% above current price
-                take_profit = current_price * 0.95  # 5% below current price
-        else:  # HOLD
-            stop_loss = None
-            take_profit = None
-        
-        # Construct mock prediction
-        prediction = {
-            "symbol": symbol,
-            "timestamp": timestamp,
-            "prediction": {
-                "action": action,
-                "confidence": confidence
-            }
+        mock = {
+            'prediction': {
+                'action': 'HOLD',
+                'confidence': 0.64,
+                'stop_loss': current_price * 0.98 if current_price > 0 else None,
+                'take_profit': current_price * 1.02 if current_price > 0 else None,
+                'reasoning': 'Mock prediction due to API error',
+                'risk_reward_ratio': 1.0
+            },
+            'timestamp': int(time.time() * 1000),
+            'symbol': data.get('symbol', 'BTCUSDT')
         }
         
-        # Add stop loss and take profit if not HOLD
-        if stop_loss is not None:
-            prediction["prediction"]["stop_loss"] = stop_loss
-            
-        if take_profit is not None:
-            prediction["prediction"]["take_profit"] = take_profit
-            
-        return prediction
+        return mock
 
     def _add_technical_indicators(self, data: Dict[str, Any]) -> None:
         """Add technical indicators to market data"""
