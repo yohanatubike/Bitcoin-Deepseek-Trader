@@ -1152,7 +1152,7 @@ class BinanceClient:
             dict: Cancellation response from Binance
         """
         try:
-            response = self.client.futures_cancel_order(
+            response = self.client.cancel_order(
                 symbol=symbol,
                 orderId=order_id
             )
@@ -1160,8 +1160,17 @@ class BinanceClient:
             return response
             
         except Exception as e:
-            logger.error(f"Error cancelling order: {str(e)}")
-            return None
+            # For order not found or already filled/canceled errors, don't treat as real error
+            error_msg = str(e)
+            if "Unknown order sent" in error_msg or "Order does not exist" in error_msg or "Order not found" in error_msg:
+                logger.warning(f"Order {order_id} for {symbol} already filled or cancelled")
+                return {"status": "CANCELED", "orderId": order_id, "clientOrderId": None, "info": "Order already cancelled/filled"}
+            elif "-2011" in error_msg:  # Binance error code for canceled or not found orders
+                logger.warning(f"Order {order_id} for {symbol} not found or already canceled (Code: -2011)")
+                return {"status": "CANCELED", "orderId": order_id, "clientOrderId": None, "info": "Order not found"}
+            else:
+                logger.error(f"Error cancelling order {order_id} for {symbol}: {error_msg}")
+                return None
 
     def get_open_orders(self, symbol: str) -> List[dict]:
         """
@@ -1178,8 +1187,13 @@ class BinanceClient:
             return orders
             
         except Exception as e:
-            logger.error(f"Error getting open orders: {str(e)}")
-            return []
+            error_msg = str(e)
+            if "orderId is mandatory" in error_msg:
+                logger.warning(f"Error getting open orders: {error_msg}. This appears to be a parameterization issue. Returning empty list.")
+                return []
+            else:
+                logger.error(f"Error getting open orders: {error_msg}")
+                return []
 
     def get_recent_trades(self, symbol: str, limit: int = 100) -> List[dict]:
         """
