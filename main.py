@@ -392,22 +392,18 @@ class TradingBot:
                         else:
                             # Execute the trade
                             success = self.trade_executor.execute_trade(
-                                symbol=self.symbol,
-                                action=action,
-                                confidence=confidence,
-                                confidence_threshold=self.confidence_threshold,
-                                stop_loss=stop_loss,
-                                take_profit=take_profit,
-                                volatility=volatility
+                                prediction=prediction,
+                                market_data=enriched_data
                             )
                             
                             if success:
                                 logger.info(f"✅ Successfully executed {action} trade for {self.symbol}")
                                 self.session_trades_count += 1
                             else:
-                                logger.warning(f"⚠️ Failed to execute {action} trade for {self.symbol}")
+                                logger.error(f"❌ Failed to execute {action} trade for {self.symbol}")
             else:
-                logger.info(f"⏸️ Confidence {confidence:.2f} below threshold {self.confidence_threshold}, no trade executed")
+                logger.info(f"⚠️ Confidence {confidence:.2f} below threshold {self.confidence_threshold}")
+                logger.info("Skipping trade execution")
                 
             # 8. Log active positions
             active_positions = self.trade_executor.get_active_positions()

@@ -1092,7 +1092,8 @@ class BinanceClient:
                 "timeInForce": "GTC"
             }
             
-            response = self.client.futures_create_order(**params)
+            # Using new_order instead of futures_create_order
+            response = self.client.new_order(**params)
             logger.info(f"Created stop loss order: {side} {formatted_quantity} {symbol} @ {formatted_price}")
             return response
             
@@ -1130,7 +1131,8 @@ class BinanceClient:
                 "timeInForce": "GTC"
             }
             
-            response = self.client.futures_create_order(**params)
+            # Using new_order instead of futures_create_order
+            response = self.client.new_order(**params)
             logger.info(f"Created take profit order: {side} {formatted_quantity} {symbol} @ {formatted_price}")
             return response
             
@@ -1172,7 +1174,7 @@ class BinanceClient:
             List[dict]: List of open orders
         """
         try:
-            orders = self.client.futures_get_open_orders(symbol=symbol)
+            orders = self.client.get_open_orders(symbol=symbol)
             return orders
             
         except Exception as e:

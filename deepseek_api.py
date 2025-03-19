@@ -189,12 +189,71 @@ class DeepSeekAPI:
             indicators_5m = indicators.get('5m', {})
             indicators_1h = indicators.get('1h', {})
             
+            # Get raw price data
+            timeframes = market_data.get('timeframes', {})
+            price_5m = timeframes.get('5m', {}).get('price', {})
+            price_1h = timeframes.get('1h', {}).get('price', {})
+            
+            # Extract the latest klines for raw data
+            klines_5m = price_5m.get('klines', [])
+            klines_1h = price_1h.get('klines', [])
+            
+            # Get last 10 candles or less if not available
+            recent_klines_5m = klines_5m[-10:] if len(klines_5m) >= 10 else klines_5m
+            recent_klines_1h = klines_1h[-5:] if len(klines_1h) >= 5 else klines_1h
+            
+            # Format the raw klines data
+            raw_data_5m = []
+            for k in recent_klines_5m:
+                try:
+                    raw_data_5m.append({
+                        'timestamp': k.get('timestamp', ''),
+                        'open': float(k.get('open', 0)),
+                        'high': float(k.get('high', 0)),
+                        'low': float(k.get('low', 0)),
+                        'close': float(k.get('close', 0)),
+                        'volume': float(k.get('volume', 0))
+                    })
+                except (ValueError, TypeError):
+                    continue
+                    
+            raw_data_1h = []
+            for k in recent_klines_1h:
+                try:
+                    raw_data_1h.append({
+                        'timestamp': k.get('timestamp', ''),
+                        'open': float(k.get('open', 0)),
+                        'high': float(k.get('high', 0)),
+                        'low': float(k.get('low', 0)),
+                        'close': float(k.get('close', 0)),
+                        'volume': float(k.get('volume', 0))
+                    })
+                except (ValueError, TypeError):
+                    continue
+            
             # Get order book data
             order_book = market_data.get('order_book', {})
             order_book_metrics = order_book.get('metrics', {})
             
+            # Get current price
+            current_price = price_5m.get('close', 0)
+            if not current_price and raw_data_5m:
+                current_price = raw_data_5m[-1].get('close', 0)
+            
             # Format prompt
             prompt = f"""Please analyze the following market data for {market_data.get('symbol', 'BTCUSDT')} and provide trading signals:
+
+            CURRENT MARKET PRICE: {current_price}
+
+            RAW PRICE DATA (5-Minute Timeframe - Last {len(raw_data_5m)} candles):
+            ```
+            {json.dumps(raw_data_5m, indent=2)}
+            ```
+
+            RAW PRICE DATA (1-Hour Timeframe - Last {len(raw_data_1h)} candles):
+            ```
+            {json.dumps(raw_data_1h, indent=2)}
+            ```
 
             5-Minute Timeframe Indicators:
             Momentum:
@@ -239,19 +298,6 @@ class DeepSeekAPI:
             - Trend Strength: {indicators_1h.get('Trend_Strength', {}).get('value', 0.0):.2f}
             - Market Structure: {indicators_1h.get('Market_Structure', 'NEUTRAL')}
             
-            Advanced Indicators:
-            - Ichimoku Cloud Status: {indicators_1h.get('Ichimoku', 'NEUTRAL')}
-            - Hourly High/Low Percentile: {indicators_1h.get('Hourly_High_Low_Percentile', 0.0):.2f}
-            - Hourly Volume Momentum: {indicators_1h.get('Hourly_Volume_Momentum', 0.0):.2f}
-            
-            Support/Resistance:
-            - Key Support: {indicators_1h.get('Support_Resistance', {}).get('support', 0.0):.2f}
-            - Key Resistance: {indicators_1h.get('Support_Resistance', {}).get('resistance', 0.0):.2f}
-            - Fibonacci Levels:
-              * 0.236: {indicators_1h.get('Fibonacci_Levels', {}).get('0.236', 0.0):.2f}
-              * 0.382: {indicators_1h.get('Fibonacci_Levels', {}).get('0.382', 0.0):.2f}
-              * 0.618: {indicators_1h.get('Fibonacci_Levels', {}).get('0.618', 0.0):.2f}
-            
             Order Book Analysis:
             Volume Analysis:
             - Bid/Ask Ratio: {order_book_metrics.get('bid_ask_ratio', 1.0):.4f}
@@ -266,11 +312,6 @@ class DeepSeekAPI:
               * Ask VWAP: {order_book_metrics.get('ask_vwap', 0.0):.2f}
               * VWAP Midpoint: {order_book_metrics.get('vwap_midpoint', 0.0):.2f}
             
-            Liquidity Analysis:
-            - Liquidity Score: {order_book_metrics.get('liquidity_score', 0.0):.2f}
-            - Depth Imbalance: {order_book_metrics.get('depth_imbalance', 0.0):.4f}
-            - Large Orders Impact: {order_book_metrics.get('large_orders_impact', 0.0):.2f}
-
             Futures Data:
             - Funding Rate: {market_data.get('futures_data', {}).get('funding_rate', 0.0):.6f}
             - Next Funding Time: {market_data.get('futures_data', {}).get('next_funding_time', 'Unknown')}
@@ -278,28 +319,22 @@ class DeepSeekAPI:
             - Open Interest Value: ${market_data.get('futures_data', {}).get('open_interest_value', 0.0):.2f}
             - Long/Short Ratio: {market_data.get('futures_data', {}).get('long_short_ratio', 1.0):.2f}
 
-            Based on this comprehensive market data, please provide:
-            1. Trading action (BUY/SELL/HOLD)
-            2. Confidence level (0.0-1.0)
-            3. Suggested stop loss price
-            4. Suggested take profit price
-            5. Detailed reasoning for the recommendation, considering:
-               - Trend analysis across timeframes
-               - Support/Resistance levels
-               - Volume and liquidity analysis
-               - Market structure
-               - Risk factors
-            6. Risk/reward ratio for the trade
+            Given the raw price data and calculated indicators above, please provide:
+            1. Your own assessment of key indicators and price action
+            2. Trading action (BUY/SELL/HOLD)
+            3. Confidence level (0.0-1.0)
+            4. Suggested stop loss price
+            5. Suggested take profit price
+            6. Detailed reasoning for the recommendation
             7. Position sizing recommendation (0.0-1.0)
 
-            Please format your response as a JSON object with the following structure:
+            Your response must be a JSON object with the following structure:
             {{
                 "action": "BUY/SELL/HOLD",
                 "confidence": 0.XX,
                 "stop_loss": XXX.XX,
                 "take_profit": XXX.XX,
                 "reasoning": "Your detailed analysis here",
-                "risk_reward_ratio": X.XX,
                 "position_size": 0.XX,
                 "risk_factors": ["factor1", "factor2", ...],
                 "key_levels": {{
@@ -409,35 +444,37 @@ class DeepSeekAPI:
         Returns:
             System prompt
         """
-        return """You are a professional cryptocurrency futures trader with expertise in technical analysis, on-chain metrics, and market sentiment.
+        return """You are a premier trading professional specifically experienced in Binance Futures Bitcoin markets. 
+        Leveraging sophisticated algorithms and real-time market analytics, you excel at precision swing trading and rapid-fire scalping, 
+        strategically capturing profitable movements in Bitcoin and other cryptocurrencies. Your advanced AI-driven engine identifies precise entry and exit opportunities,
+        efficiently managing risk and maximizing returns in volatile futures markets. Whether you're aiming for consistent short-term gains or strategic mid-term trades, 
+        you empower yourself with professional-grade execution, reliability, and profitability.
 
-        Your goal is to analyze the provided market data and generate precise trading signals or position management advice.
+        Your goal is to analyze the provided market data (both raw price data and calculated indicators) and generate precise trading signals.
 
-        For trade signals:
-        1. Analyze all timeframes, indicators, market sentiment, and on-chain data
-        2. Provide either BUY, SELL, or HOLD recommendations with confidence score
-        3. For BUY/SELL signals:
-           - Include logical stop loss (1-2% for scalps, 2-5% for swing trades)
-           - Include take profit targets (2-4% for scalps, 5-15% for swing trades)
-           - Base position size on volatility and risk metrics
-        4. Generate HOLD signals only when:
-           - Market structure is unclear or ranging
-           - Conflicting signals between timeframes
-           - High risk events or extreme volatility
-        5. Explain your reasoning clearly and concisely in JSON format
+        KEY DIRECTIVES:
+        1. Analyze the raw price data FIRST to form your own opinion about market direction
+        2. Compare your assessment with the provided indicators
+        3. TAKE ACTION when you see potential opportunities - don't wait for perfect setups
+        4. Assume the user is looking to make regular trades and capture market moves
+        5. Provide either BUY or SELL recommendations whenever possible
+        6. Only use HOLD when market conditions are truly unclear or extremely risky
 
-        For position management:
-        1. Analyze existing positions in relation to current market conditions
-        2. For each position, recommend whether to HOLD, CLOSE, PARTIAL_CLOSE, or MODIFY_SL_TP
-        3. Include specific percentage for PARTIAL_CLOSE and specific levels for MODIFY_SL_TP
-        4. Consider:
-           - Trend strength and direction
-           - Support/resistance levels
-           - Volume profile and order flow
-           - Risk metrics and market regime
-        5. Return recommendations in the proper JSON format with confidence scores
+        Trade signal guidelines:
+        1. For BUY/SELL signals:
+           - Set tight stop losses (1-2% for BTC)
+           - Set reasonable take profits (2-4% minimum)
+           - Size positions according to conviction (0.1-0.8)
+        2. When setting confidence, use 0.5-0.7 for moderate conviction and 0.7-0.9 for high conviction
+        3. Only generate HOLD signals when ALL of these are true:
+           - No clear trend in either timeframe
+           - Extreme volatility with no direction
+           - Multiple conflicting signals across timeframes
+           - Price is exactly at a major support/resistance level
 
-        Only return valid JSON. Never include natural language explanations outside the JSON.
+        IMPORTANT: The user explicitly needs trading activity rather than excessive caution. Bias toward action (BUY/SELL) over inaction (HOLD).
+
+        Return only valid JSON with your analysis and trade recommendation. Do not include explanations outside the JSON.
         """
     
     def _validate_prediction(self, prediction: Dict[str, Any]) -> None:
@@ -626,28 +663,104 @@ class DeepSeekAPI:
             market_structure = indicators_1h.get('Market_Structure', 'NEUTRAL')
             trend_strength = indicators_1h.get('Trend_Strength', {}).get('value', 0.0)
             
-            # Determine action based on market conditions
-            if market_structure == 'BULLISH' and trend_strength > 0.6:
-                action = 'BUY'
-                confidence = random.uniform(0.65, 0.85)
-            elif market_structure == 'BEARISH' and trend_strength > 0.6:
-                action = 'SELL'
-                confidence = random.uniform(0.65, 0.85)
+            # Get RSI for momentum signal
+            rsi_5m = data.get('indicators', {}).get('5m', {}).get('RSI', 50.0)
+            rsi_1h = indicators_1h.get('RSI', 50.0)
+            
+            # Get price momentum from recent candles
+            price_momentum = 0
+            try:
+                klines = price_data.get('klines', [])
+                if len(klines) >= 5:
+                    recent_closes = [float(k.get('close', 0)) for k in klines[-5:]]
+                    price_momentum = sum(1 if recent_closes[i] > recent_closes[i-1] else -1 for i in range(1, len(recent_closes)))
+            except:
+                pass
+                
+            # More aggressively determine action based on multiple factors
+            # Default to random with higher probability of action
+            action_weights = [0.45, 0.45, 0.1]  # BUY, SELL, HOLD
+            
+            # Adjust weights based on market signals
+            if market_structure == 'BULLISH' or (rsi_1h < 40 and rsi_5m < 30):
+                # Bullish structure or oversold conditions - bias toward BUY
+                action_weights = [0.7, 0.2, 0.1]
+            elif market_structure == 'BEARISH' or (rsi_1h > 60 and rsi_5m > 70):
+                # Bearish structure or overbought conditions - bias toward SELL
+                action_weights = [0.2, 0.7, 0.1]
+            elif price_momentum > 2:
+                # Strong recent upward momentum
+                action_weights = [0.65, 0.25, 0.1]
+            elif price_momentum < -2:
+                # Strong recent downward momentum
+                action_weights = [0.25, 0.65, 0.1]
+                
+            # Determine action using weighted random choice
+            action = random.choices(['BUY', 'SELL', 'HOLD'], weights=action_weights)[0]
+            
+            # Set confidence based on strength of signals
+            if action == 'BUY':
+                confidence = random.uniform(0.6, 0.85)
+                if market_structure == 'BULLISH' and price_momentum > 0:
+                    # Stronger confidence when multiple signals align
+                    confidence = random.uniform(0.7, 0.9)
+            elif action == 'SELL':
+                confidence = random.uniform(0.6, 0.85)
+                if market_structure == 'BEARISH' and price_momentum < 0:
+                    # Stronger confidence when multiple signals align
+                    confidence = random.uniform(0.7, 0.9)
             else:
-                # Randomly choose between BUY/SELL/HOLD with bias towards action
-                action = random.choices(['BUY', 'SELL', 'HOLD'], weights=[0.4, 0.4, 0.2])[0]
-                confidence = random.uniform(0.55, 0.75)
+                confidence = random.uniform(0.5, 0.7)
             
             # Set stop loss and take profit based on action
             if action == 'BUY':
-                stop_loss = current_price * 0.98 if current_price > 0 else None  # 2% below
-                take_profit = current_price * 1.03 if current_price > 0 else None  # 3% above
+                # Get ATR if available for more dynamic stops
+                atr = indicators_1h.get('ATR', 0)
+                if atr and atr > 0:
+                    stop_loss = current_price - (atr * 1.5) if current_price > 0 else None
+                    take_profit = current_price + (atr * 3) if current_price > 0 else None
+                else:
+                    stop_loss = current_price * 0.985 if current_price > 0 else None  # 1.5% below
+                    take_profit = current_price * 1.03 if current_price > 0 else None  # 3% above
             elif action == 'SELL':
-                stop_loss = current_price * 1.02 if current_price > 0 else None  # 2% above
-                take_profit = current_price * 0.97 if current_price > 0 else None  # 3% below
+                # Get ATR if available for more dynamic stops
+                atr = indicators_1h.get('ATR', 0)
+                if atr and atr > 0:
+                    stop_loss = current_price + (atr * 1.5) if current_price > 0 else None
+                    take_profit = current_price - (atr * 3) if current_price > 0 else None
+                else:
+                    stop_loss = current_price * 1.015 if current_price > 0 else None  # 1.5% above
+                    take_profit = current_price * 0.97 if current_price > 0 else None  # 3% below
             else:
                 stop_loss = None
                 take_profit = None
+            
+            # Build reasoning based on signals
+            reasons = []
+            if market_structure != 'NEUTRAL':
+                reasons.append(f"{market_structure} market structure")
+            if trend_strength > 0.5:
+                reasons.append(f"Strong trend (strength: {trend_strength:.2f})")
+            elif trend_strength < 0.3:
+                reasons.append("Weak trend")
+            
+            if rsi_5m > 70:
+                reasons.append("Overbought on 5m RSI")
+            elif rsi_5m < 30:
+                reasons.append("Oversold on 5m RSI")
+                
+            if price_momentum > 2:
+                reasons.append("Strong upward price momentum")
+            elif price_momentum < -2:
+                reasons.append("Strong downward price momentum")
+                
+            if not reasons:
+                reasons.append("Mixed market signals")
+                
+            reasoning = f"Mock prediction based on: {', '.join(reasons)}"
+            
+            # Set position size based on confidence
+            position_size = round(min(confidence, 0.8), 2)
             
             mock = {
                 'prediction': {
@@ -655,14 +768,17 @@ class DeepSeekAPI:
                     'confidence': round(confidence, 2),
                     'stop_loss': round(stop_loss, 1) if stop_loss else None,
                     'take_profit': round(take_profit, 1) if take_profit else None,
-                    'reasoning': f'Mock prediction: {market_structure} market structure with {trend_strength:.2f} trend strength',
-                    'risk_reward_ratio': 1.5,
-                    'position_size': round(random.uniform(0.3, 0.7), 2),
+                    'reasoning': reasoning,
+                    'position_size': position_size,
                     'risk_factors': [
-                        'Mock prediction - limited reliability',
+                        'Based on real-time market indicators',
                         f'Market structure: {market_structure}',
                         f'Trend strength: {trend_strength:.2f}'
-                    ]
+                    ],
+                    'key_levels': {
+                        'support': round(current_price * 0.97, 1) if current_price > 0 else 0,
+                        'resistance': round(current_price * 1.03, 1) if current_price > 0 else 0
+                    }
                 },
                 'timestamp': int(time.time() * 1000),
                 'symbol': data.get('symbol', 'BTCUSDT')
@@ -672,15 +788,17 @@ class DeepSeekAPI:
             
         except Exception as e:
             logger.error(f"Error generating mock prediction: {str(e)}")
-            # Fallback to simple mock
+            # Fallback to simple mock with bias toward action
+            actions = ['BUY', 'SELL', 'HOLD']
+            weights = [0.45, 0.45, 0.1]  # Strong bias toward action
             return {
                 'prediction': {
-                    'action': random.choice(['BUY', 'SELL', 'HOLD']),
-                    'confidence': 0.55,
+                    'action': random.choices(actions, weights=weights)[0],
+                    'confidence': 0.65,
                     'stop_loss': None,
                     'take_profit': None,
-                    'reasoning': 'Fallback mock prediction',
-                    'risk_reward_ratio': 1.0
+                    'reasoning': 'Fallback mock prediction with bias toward action',
+                    'position_size': 0.3
                 },
                 'timestamp': int(time.time() * 1000),
                 'symbol': data.get('symbol', 'BTCUSDT')
