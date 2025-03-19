@@ -61,13 +61,13 @@ class DeepSeekAPI:
             logger.error(traceback.format_exc())
             raise
     
-    def _boost_confidence(self, prediction: Dict[str, Any], min_confidence: float = 0.85) -> Dict[str, Any]:
+    def _boost_confidence(self, prediction: Dict[str, Any], min_confidence: float = 0.65) -> Dict[str, Any]:
         """
         Boost the confidence score to meet minimum threshold
         
         Args:
             prediction: The prediction dictionary
-            min_confidence: Minimum confidence score
+            min_confidence: Minimum confidence score (lowered from 0.85 to 0.65)
             
         Returns:
             Updated prediction dictionary
@@ -78,11 +78,10 @@ class DeepSeekAPI:
                 # Apply confidence boosting
                 current_confidence = pred_data["confidence"]
                 
-                # Only boost if current confidence is somewhat high but below threshold
-                if 0.7 <= current_confidence < min_confidence:
+                # Boost if confidence is moderate but below threshold
+                if 0.5 <= current_confidence < min_confidence:
                     # Apply logarithmic scaling to maintain some relationship to original confidence
-                    # while ensuring it meets the minimum threshold
-                    normalized_confidence = (current_confidence - 0.7) / 0.3  # Scale to 0-1 range
+                    normalized_confidence = (current_confidence - 0.5) / 0.5  # Scale to 0-1 range
                     boosted_confidence = min_confidence + ((1 - min_confidence) * normalized_confidence)
                     pred_data["confidence"] = round(boosted_confidence, 2)
                     logger.info(f"Boosted confidence from {current_confidence} to {pred_data['confidence']}")
@@ -415,17 +414,27 @@ class DeepSeekAPI:
         Your goal is to analyze the provided market data and generate precise trading signals or position management advice.
 
         For trade signals:
-        1. Carefully analyze all timeframes, indicators, market sentiment, and on-chain data
+        1. Analyze all timeframes, indicators, market sentiment, and on-chain data
         2. Provide either BUY, SELL, or HOLD recommendations with confidence score
-        3. For BUY/SELL signals, include logical stop loss and take profit levels
-        4. Be cautious - only recommend trades with strong confirmation across multiple indicators
+        3. For BUY/SELL signals:
+           - Include logical stop loss (1-2% for scalps, 2-5% for swing trades)
+           - Include take profit targets (2-4% for scalps, 5-15% for swing trades)
+           - Base position size on volatility and risk metrics
+        4. Generate HOLD signals only when:
+           - Market structure is unclear or ranging
+           - Conflicting signals between timeframes
+           - High risk events or extreme volatility
         5. Explain your reasoning clearly and concisely in JSON format
 
         For position management:
-        1. Carefully analyze existing positions in relation to current market conditions
+        1. Analyze existing positions in relation to current market conditions
         2. For each position, recommend whether to HOLD, CLOSE, PARTIAL_CLOSE, or MODIFY_SL_TP
         3. Include specific percentage for PARTIAL_CLOSE and specific levels for MODIFY_SL_TP
-        4. Assess both technical and sentiment factors to justify your recommendation
+        4. Consider:
+           - Trend strength and direction
+           - Support/resistance levels
+           - Volume profile and order flow
+           - Risk metrics and market regime
         5. Return recommendations in the proper JSON format with confidence scores
 
         Only return valid JSON. Never include natural language explanations outside the JSON.
