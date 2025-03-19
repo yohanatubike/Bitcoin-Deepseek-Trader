@@ -470,115 +470,111 @@ class DeepSeekAPI:
         if action not in ["BUY", "SELL", "HOLD"]:
             raise ValueError(f"Invalid action: {action}")
             
-        # Validate confidence
+        # Validate confidence - now more lenient
         confidence = pred_data.get("confidence", 0)
         if not isinstance(confidence, (int, float)) or confidence < 0 or confidence > 1:
-            logger.warning(f"Invalid confidence: {confidence}. Defaulting to 0.5")
-            pred_data["confidence"] = 0.5
+            # Default to moderate confidence instead of low
+            logger.warning(f"Invalid confidence: {confidence}. Setting to 0.6")
+            pred_data["confidence"] = 0.6
             
         # Get symbol for precision formatting
-        symbol = prediction.get("symbol", "BTCUSDT")  # Get symbol from the response
+        symbol = prediction.get("symbol", "BTCUSDT")
         
+        # Get current price for calculations
+        try:
+            price_data = self._market_data.get("timeframes", {}).get("5m", {}).get("price", {})
+            current_price = price_data.get("close", 0)
+        except Exception:
+            current_price = 0
+            
         # Validate stop_loss and take_profit if action is not HOLD
         if action != "HOLD":
+            # Get ATR for dynamic SL/TP calculation
+            try:
+                atr = self._market_data.get("indicators", {}).get("1h", {}).get("ATR", 0)
+                atr_multiplier = 2.0  # Adjust this value to control SL/TP distances
+            except Exception:
+                atr = 0
+                
             # Validate stop_loss for BUY actions
             stop_loss = pred_data.get("stop_loss")
-            if action == "BUY" and (stop_loss is None or stop_loss == "N/A" or not isinstance(stop_loss, (int, float)) or stop_loss <= 0):
-                # Get current price and set default stop loss 2% below
-                try:
-                    # Get price data from stored market data
-                    price_data = self._market_data.get("timeframes", {}).get("5m", {}).get("price", {})
-                    current_price = price_data.get("close", 0)
-                    
+            if action == "BUY":
+                if not stop_loss or not isinstance(stop_loss, (int, float)) or stop_loss <= 0:
                     if current_price > 0:
-                        default_stop = current_price * 0.98  # 2% below current price
-                        
-                        # Apply appropriate precision based on symbol
-                        if symbol == "BTCUSDT":
-                            default_stop = round(default_stop, 1)  # 1 decimal place for BTC
+                        # Use ATR for dynamic stop loss if available, otherwise use percentage
+                        if atr > 0:
+                            default_stop = current_price - (atr * atr_multiplier)
+                        else:
+                            default_stop = current_price * 0.985  # 1.5% below for tighter stops
                             
-                        logger.warning(f"Invalid stop_loss for BUY. Setting default 2% below current price: {default_stop}")
+                        if symbol == "BTCUSDT":
+                            default_stop = round(default_stop, 1)
+                            
+                        logger.info(f"Setting dynamic stop loss for BUY at: {default_stop}")
                         pred_data["stop_loss"] = default_stop
-                    else:
-                        logger.error("Could not set default stop_loss: current price unavailable")
-                except Exception as e:
-                    logger.error(f"Error setting default stop_loss: {str(e)}")
-            elif stop_loss is not None and isinstance(stop_loss, (int, float)) and stop_loss > 0:
-                # Format existing stop loss to correct precision
-                if symbol == "BTCUSDT":
-                    pred_data["stop_loss"] = round(stop_loss, 1)
-            
+                        
             # Validate stop_loss for SELL actions
-            if action == "SELL" and (stop_loss is None or stop_loss == "N/A" or not isinstance(stop_loss, (int, float)) or stop_loss <= 0):
-                # Get current price and set default stop loss 2% above
-                try:
-                    price_data = self._market_data.get("timeframes", {}).get("5m", {}).get("price", {})
-                    current_price = price_data.get("close", 0)
-                    
+            elif action == "SELL":
+                if not stop_loss or not isinstance(stop_loss, (int, float)) or stop_loss <= 0:
                     if current_price > 0:
-                        default_stop = current_price * 1.02  # 2% above current price
-                        
-                        # Apply appropriate precision based on symbol
-                        if symbol == "BTCUSDT":
-                            default_stop = round(default_stop, 1)  # 1 decimal place for BTC
+                        # Use ATR for dynamic stop loss if available, otherwise use percentage
+                        if atr > 0:
+                            default_stop = current_price + (atr * atr_multiplier)
+                        else:
+                            default_stop = current_price * 1.015  # 1.5% above for tighter stops
                             
-                        logger.warning(f"Invalid stop_loss for SELL. Setting default 2% above current price: {default_stop}")
+                        if symbol == "BTCUSDT":
+                            default_stop = round(default_stop, 1)
+                            
+                        logger.info(f"Setting dynamic stop loss for SELL at: {default_stop}")
                         pred_data["stop_loss"] = default_stop
-                    else:
-                        logger.error("Could not set default stop_loss: current price unavailable")
-                except Exception as e:
-                    logger.error(f"Error setting default stop_loss: {str(e)}")
-            elif stop_loss is not None and isinstance(stop_loss, (int, float)) and stop_loss > 0:
-                # Format existing stop loss to correct precision
-                if symbol == "BTCUSDT":
-                    pred_data["stop_loss"] = round(stop_loss, 1)
-                    
-            # Validate take_profit
-            take_profit = pred_data.get("take_profit")
-            if take_profit is None or take_profit == "N/A" or not isinstance(take_profit, (int, float)) or take_profit <= 0:
-                # Set default take profit based on action
-                try:
-                    price_data = self._market_data.get("timeframes", {}).get("5m", {}).get("price", {})
-                    current_price = price_data.get("close", 0)
-                    
-                    if current_price > 0:
-                        # For BUY: 3% above current price
-                        # For SELL: 3% below current price
-                        default_tp = current_price * (1.03 if action == "BUY" else 0.97)
                         
-                        # Apply appropriate precision based on symbol
-                        if symbol == "BTCUSDT":
-                            default_tp = round(default_tp, 1)  # 1 decimal place for BTC
-                            
-                        logger.warning(f"Invalid take_profit for {action}. Setting default: {default_tp}")
-                        pred_data["take_profit"] = default_tp
+            # Validate take_profit - now using wider targets for better R:R
+            take_profit = pred_data.get("take_profit")
+            if not take_profit or not isinstance(take_profit, (int, float)) or take_profit <= 0:
+                if current_price > 0:
+                    # Calculate take profit based on stop loss distance for good R:R
+                    if "stop_loss" in pred_data and pred_data["stop_loss"]:
+                        stop_distance = abs(current_price - pred_data["stop_loss"])
+                        if action == "BUY":
+                            default_tp = current_price + (stop_distance * 2)  # 2:1 reward:risk ratio
+                        else:
+                            default_tp = current_price - (stop_distance * 2)
                     else:
-                        logger.error("Could not set default take_profit: current price unavailable")
-                except Exception as e:
-                    logger.error(f"Error setting default take_profit: {str(e)}")
-            elif take_profit is not None and isinstance(take_profit, (int, float)) and take_profit > 0:
-                # Format existing take profit to correct precision
-                if symbol == "BTCUSDT":
-                    pred_data["take_profit"] = round(take_profit, 1)
-        
-        # For HOLD actions, stop_loss and take_profit can be None
-        if action == "HOLD":
-            # If HOLD but stop_loss and take_profit are provided, do basic validation
-            if "stop_loss" in pred_data and pred_data["stop_loss"] is not None:
-                stop_loss = pred_data["stop_loss"]
-                if not isinstance(stop_loss, (int, float)) or stop_loss <= 0:
-                    pred_data["stop_loss"] = None
-                elif symbol == "BTCUSDT":
-                    # Ensure proper precision
-                    pred_data["stop_loss"] = round(stop_loss, 1)
+                        # Fallback to percentage-based
+                        if action == "BUY":
+                            default_tp = current_price * 1.03  # 3% target
+                        else:
+                            default_tp = current_price * 0.97
+                            
+                    if symbol == "BTCUSDT":
+                        default_tp = round(default_tp, 1)
+                        
+                    logger.info(f"Setting take profit for {action} at: {default_tp}")
+                    pred_data["take_profit"] = default_tp
                     
-            if "take_profit" in pred_data and pred_data["take_profit"] is not None:
-                take_profit = pred_data["take_profit"]
-                if not isinstance(take_profit, (int, float)) or take_profit <= 0:
-                    pred_data["take_profit"] = None
-                elif symbol == "BTCUSDT":
-                    # Ensure proper precision
-                    pred_data["take_profit"] = round(take_profit, 1)
+        # For HOLD actions, clear SL/TP
+        else:
+            pred_data["stop_loss"] = None
+            pred_data["take_profit"] = None
+            
+        # Add position sizing if missing
+        if "position_size" not in pred_data and action != "HOLD":
+            # Calculate position size based on volatility and trend strength
+            try:
+                volatility = self._market_data.get("indicators", {}).get("1h", {}).get("Historical_Volatility", 0)
+                trend_strength = self._market_data.get("indicators", {}).get("1h", {}).get("Trend_Strength", {}).get("value", 0)
+                
+                # Base size on market conditions
+                if volatility > 0 and trend_strength > 0:
+                    # Larger size for strong trends with low volatility
+                    position_size = min(0.8, (trend_strength / volatility) * 0.5)
+                else:
+                    position_size = 0.3  # Default conservative size
+                    
+                pred_data["position_size"] = round(max(0.1, min(0.8, position_size)), 2)
+            except Exception:
+                pred_data["position_size"] = 0.3  # Default conservative size
     
     def _save_prediction(self, payload: Dict[str, Any], prediction: Dict[str, Any]) -> None:
         """
@@ -619,22 +615,76 @@ class DeepSeekAPI:
     
     def _generate_mock_prediction(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Generate a mock prediction when the API fails"""
-        current_price = float(data.get('current_price', 0.0))
-        
-        mock = {
-            'prediction': {
-                'action': 'HOLD',
-                'confidence': 0.64,
-                'stop_loss': current_price * 0.98 if current_price > 0 else None,
-                'take_profit': current_price * 1.02 if current_price > 0 else None,
-                'reasoning': 'Mock prediction due to API error',
-                'risk_reward_ratio': 1.0
-            },
-            'timestamp': int(time.time() * 1000),
-            'symbol': data.get('symbol', 'BTCUSDT')
-        }
-        
-        return mock
+        try:
+            # Get current price and indicators
+            timeframes = data.get('timeframes', {})
+            price_data = timeframes.get('5m', {}).get('price', {})
+            current_price = float(price_data.get('close', 0.0))
+            
+            # Get market structure and trend data
+            indicators_1h = data.get('indicators', {}).get('1h', {})
+            market_structure = indicators_1h.get('Market_Structure', 'NEUTRAL')
+            trend_strength = indicators_1h.get('Trend_Strength', {}).get('value', 0.0)
+            
+            # Determine action based on market conditions
+            if market_structure == 'BULLISH' and trend_strength > 0.6:
+                action = 'BUY'
+                confidence = random.uniform(0.65, 0.85)
+            elif market_structure == 'BEARISH' and trend_strength > 0.6:
+                action = 'SELL'
+                confidence = random.uniform(0.65, 0.85)
+            else:
+                # Randomly choose between BUY/SELL/HOLD with bias towards action
+                action = random.choices(['BUY', 'SELL', 'HOLD'], weights=[0.4, 0.4, 0.2])[0]
+                confidence = random.uniform(0.55, 0.75)
+            
+            # Set stop loss and take profit based on action
+            if action == 'BUY':
+                stop_loss = current_price * 0.98 if current_price > 0 else None  # 2% below
+                take_profit = current_price * 1.03 if current_price > 0 else None  # 3% above
+            elif action == 'SELL':
+                stop_loss = current_price * 1.02 if current_price > 0 else None  # 2% above
+                take_profit = current_price * 0.97 if current_price > 0 else None  # 3% below
+            else:
+                stop_loss = None
+                take_profit = None
+            
+            mock = {
+                'prediction': {
+                    'action': action,
+                    'confidence': round(confidence, 2),
+                    'stop_loss': round(stop_loss, 1) if stop_loss else None,
+                    'take_profit': round(take_profit, 1) if take_profit else None,
+                    'reasoning': f'Mock prediction: {market_structure} market structure with {trend_strength:.2f} trend strength',
+                    'risk_reward_ratio': 1.5,
+                    'position_size': round(random.uniform(0.3, 0.7), 2),
+                    'risk_factors': [
+                        'Mock prediction - limited reliability',
+                        f'Market structure: {market_structure}',
+                        f'Trend strength: {trend_strength:.2f}'
+                    ]
+                },
+                'timestamp': int(time.time() * 1000),
+                'symbol': data.get('symbol', 'BTCUSDT')
+            }
+            
+            return mock
+            
+        except Exception as e:
+            logger.error(f"Error generating mock prediction: {str(e)}")
+            # Fallback to simple mock
+            return {
+                'prediction': {
+                    'action': random.choice(['BUY', 'SELL', 'HOLD']),
+                    'confidence': 0.55,
+                    'stop_loss': None,
+                    'take_profit': None,
+                    'reasoning': 'Fallback mock prediction',
+                    'risk_reward_ratio': 1.0
+                },
+                'timestamp': int(time.time() * 1000),
+                'symbol': data.get('symbol', 'BTCUSDT')
+            }
 
     def _add_technical_indicators(self, data: Dict[str, Any]) -> None:
         """Add technical indicators to market data"""
